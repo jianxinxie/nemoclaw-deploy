@@ -1,0 +1,28 @@
+sandboxName: demo
+agentName: my-agent
+
+workspace: ""
+
+agentContent:
+  enabled: true
+  hostDir: ./agent-content
+  conflictStrategy: ask
+
+skill:
+  enabled: true
+  hostDir: ./skills
+
+channel:
+  enabled: true
+  type: advbot
+  accountId: default
+  channelServerUrl: http://127.0.0.1:8080
+  gatewayToken: ""
+  gatewayUrl: ""
+
+networkPolicy:
+  enabled: true
+  dir: ./policies
+
+options:
+  restart: true

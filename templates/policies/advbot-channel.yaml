@@ -1,0 +1,22 @@
+preset:
+  name: advbot-channel
+  description: "Allow OpenClaw advbot plugin to access channel server"
+
+network_policies:
+  advbot-channel:
+    name: advbot-channel
+    endpoints:
+      - host: 127.0.0.1
+        port: 8080
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+          - allow: { method: PUT, path: "/**" }
+          - allow: { method: DELETE, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/node }
+      - { path: /usr/bin/curl }
+      - { path: /usr/local/bin/openclaw }
