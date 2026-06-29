@@ -12,6 +12,10 @@ export const agentNameSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/, {
 
 export const conflictStrategySchema = z.enum(['ask', 'skip', 'backup', 'overwrite', 'fail']);
 
+export const envNameSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, {
+  message: 'env 变量名必须以字母或下划线开头，只能包含字母、数字和下划线'
+});
+
 export function stripAngleBrackets(value: string): string {
   const trimmed = value.trim();
   if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
@@ -26,6 +30,10 @@ export function validateSandboxName(value: string): string {
 
 export function validateAgentName(value: string): string {
   return agentNameSchema.parse(value);
+}
+
+export function validateEnvName(value: string): string {
+  return envNameSchema.parse(value.trim());
 }
 
 export function validateChannelServerUrl(value: string): string {
@@ -68,6 +76,59 @@ export function dashboardUrlToGatewayUrl(input: string): string {
   }
 
   throw new Error(`Unsupported dashboard URL protocol: ${url.protocol}`);
+}
+
+export function validateEnvTargetFile(value: string): string {
+  const cleaned = value.trim() || '.env';
+  if (cleaned.includes('\0')) {
+    throw new Error('env.targetFile 不能包含空字符');
+  }
+  if (path.isAbsolute(cleaned)) {
+    throw new Error('env.targetFile 必须是相对 workspace 的路径');
+  }
+
+  const normalized = path.posix.normalize(cleaned.replace(/\\/g, '/'));
+  if (!normalized || normalized === '.' || normalized.startsWith('../') || normalized === '..') {
+    throw new Error('env.targetFile 必须位于 workspace 内');
+  }
+  if (normalized.endsWith('/')) {
+    throw new Error('env.targetFile 必须是文件路径，不能是目录');
+  }
+
+  return normalized;
+}
+
+export function validateEnvValue(name: string, value: string): string {
+  if (value.includes('\0') || value.includes('\n') || value.includes('\r')) {
+    throw new Error(`env 变量 ${name} 不能包含空字符或换行`);
+  }
+  return value;
+}
+
+export function validateDependencyCommand(value: string): string {
+  const command = value.trim();
+  if (!command) {
+    throw new Error('dependencies.commands 不能包含空命令');
+  }
+  if (command.includes('\0')) {
+    throw new Error('dependencies.commands 不能包含空字符');
+  }
+  return command;
+}
+
+export function validateDependencyWorkingDir(value: string | undefined, workspace: string): string {
+  const raw = value?.trim();
+  if (!raw) return workspace;
+  if (raw.includes('\0')) {
+    throw new Error('dependencies.workingDir 不能包含空字符');
+  }
+  if (raw.startsWith('/')) return path.posix.normalize(raw);
+
+  const normalized = path.posix.normalize(raw.replace(/\\/g, '/'));
+  if (normalized === '..' || normalized.startsWith('../')) {
+    throw new Error('dependencies.workingDir 相对路径必须位于 workspace 内');
+  }
+  return path.posix.join(workspace, normalized);
 }
 
 export async function validateAgentContentDir(hostDir: string): Promise<string> {

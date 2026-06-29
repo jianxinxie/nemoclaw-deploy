@@ -1,28 +1,130 @@
+# NemoClaw sandbox 名称，必填。
+# 可选值：已存在的 sandbox 名称，例如 demo。
 sandboxName: demo
+
+# OpenClaw agent 名称，必填。
+# 可选值：小写字母开头，最多 32 位，只能包含小写字母、数字、下划线、短横线。
 agentName: my-agent
 
+# agent workspace。
+# 留空时默认：/sandbox/.openclaw/workspace-${agentName}
 workspace: ""
 
 agentContent:
+  # 是否上传 agent 初始化内容。
+  # 可选值：true / false
   enabled: true
+
+  # 本机 agent-content 目录。
+  # 会把这个目录下面的内容合并到 workspace，不会把目录本身包进去。
   hostDir: ./agent-content
+
+  # workspace 已有同名文件时的处理方式。
+  # 可选值：
+  #   ask       交互询问，非交互模式会自动转为 fail
+  #   skip      跳过已有文件
+  #   backup    先备份为 .bak.<timestamp> 再覆盖
+  #   overwrite 直接覆盖
+  #   fail      发现冲突即失败
   conflictStrategy: ask
 
 skill:
+  # 是否安装 skill。
+  # 可选值：true / false
   enabled: true
+
+  # 本机 skills 根目录。
+  # CLI 会安装该目录下所有包含 SKILL.md 的子目录。
+  # 如果该目录本身包含 SKILL.md，也会按单个 skill 安装。
   hostDir: ./skills
 
 channel:
+  # 是否配置 advbot channel。
+  # 可选值：true / false
   enabled: true
+
+  # channel 类型。
+  # 当前可选值：advbot
   type: advbot
+
+  # advbot account id。
+  # 可选值：default 或你的业务账号标识。
   accountId: default
+
+  # advbot channel server 地址。
+  # 可选值：http://... 或 https://...
   channelServerUrl: http://127.0.0.1:8080
+
+  # OpenClaw gateway token。
+  # 留空时自动执行：nemoclaw <sandboxName> gateway-token --quiet
+  # 不建议把真实 token 写进这个文件。
   gatewayToken: ""
+
+  # OpenClaw gateway websocket URL。
+  # 留空时自动从 dashboard-url 推导。
+  # 可选值：ws://... 或 wss://...，不能包含 #token=...
   gatewayUrl: ""
 
 networkPolicy:
+  # 是否应用 network policy。
+  # 可选值：true / false
+  # policy-add 写入 live policy，应用后不需要 recover。
   enabled: true
+
+  # 本机 network policy 目录或单个 .yaml/.yml 文件。
+  # 目录模式下会按文件名字典序应用所有 .yaml / .yml。
   dir: ./policies
 
+env:
+  # 是否写入 workspace env 文件。
+  # 可选值：true / false
+  # 作用范围：当前 agent workspace，不是 sandbox 全局环境。
+  enabled: false
+
+  # env 文件路径，相对 workspace。
+  # 可选值：.env、.env.local、config/.env 等；不能是绝对路径或 ../。
+  targetFile: .env
+
+  # 普通 env 变量。
+  # 这些值会写入 ${workspace}/${targetFile}。
+  variables:
+    NODE_ENV: production
+
+  # secret env 变量。
+  # name 是写入 .env 的变量名，fromEnv 是本机环境变量名。
+  # 运行前需要先 export API_TOKEN=xxx。
+  # 不建议把真实 secret 直接写进 variables。
+  secrets:
+    - name: API_TOKEN
+      fromEnv: API_TOKEN
+
+dependencies:
+  # 是否安装 workspace 依赖。
+  # 可选值：true / false
+  enabled: false
+
+  # 依赖命令执行目录。
+  # 留空时默认 workspace。
+  # 相对路径会解析到 workspace 内，例如 app -> ${workspace}/app。
+  workingDir: ""
+
+  # 依赖安装命令，按顺序执行。
+  # 常见可选值：
+  #   - npm install
+  #   - npm ci
+  #   - pnpm install
+  #   - yarn install
+  #   - pip install -r requirements.txt
+  #   - uv sync
+  commands:
+    - npm install
+
+  # 某条依赖命令失败后是否继续执行后续命令。
+  # 可选值：true / false
+  continueOnError: false
+
 options:
+  # 是否允许工具在需要时触发后台 recover。
+  # 可选值：true / false
+  # 当前只有 channel 配置需要重新加载时才会触发；network policy 不会触发 recover。
   restart: true

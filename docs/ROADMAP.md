@@ -21,23 +21,26 @@
 - dashboard URL 到 gateway URL 推导
 - advbot channel 配置与 patch fallback
 - network policy 目录批量应用
-- recover 与基础验证
+- channel recover 与基础验证
 
-### v0.2.0 - 体验增强
+### v0.2.0 - Workspace 初始化增强
 
-目标：提升可观测性、可恢复性和部署前诊断体验。
+目标：支持部署后完成 workspace 级别运行环境初始化。
 
-- 更完整的 dry-run 资源校验报告
-- 部署步骤进度事件和结构化日志
-- 更细粒度的错误码
-- 可选 JSON 输出
-- 交互式配置向导增强
-- agent-content 冲突预览
+- workspace env 合并写入
+- 从本机环境变量读取 secret，并在日志中脱敏
+- workspace 依赖安装命令
+- network policy 应用后不再触发 recover
+- 部署计划和完成摘要展示 env/dependency 状态
 
 ### v0.3.0 - 自动化集成
 
 目标：让 CLI 更适合 CI/CD 与团队标准化部署。
 
+- 更完整的 dry-run 资源校验报告
+- 部署步骤进度事件和结构化日志
+- 更细粒度的错误码
+- 可选 JSON 输出
 - CI 模式报告
 - 配置 schema 文档生成
 - 多环境配置约定

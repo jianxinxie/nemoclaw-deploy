@@ -7,11 +7,21 @@ import {
   conflictStrategySchema,
   validateAgentName,
   validateChannelServerUrl,
+  validateDependencyCommand,
+  validateDependencyWorkingDir,
+  validateEnvName,
+  validateEnvTargetFile,
+  validateEnvValue,
   validateGatewayUrl,
   validateSandboxName
 } from '../utils/validators.js';
 
 export type ConflictStrategy = 'ask' | 'skip' | 'backup' | 'overwrite' | 'fail';
+
+export interface EnvSecretConfig {
+  name: string;
+  fromEnv?: string;
+}
 
 export interface DeployContext {
   sandboxName: string;
@@ -41,6 +51,20 @@ export interface DeployContext {
   networkPolicy: {
     enabled: boolean;
     dir?: string;
+  };
+
+  env: {
+    enabled: boolean;
+    targetFile: string;
+    variables: Record<string, string>;
+    secrets: EnvSecretConfig[];
+  };
+
+  dependencies: {
+    enabled: boolean;
+    workingDir: string;
+    commands: string[];
+    continueOnError: boolean;
   };
 
   options: {
@@ -89,6 +113,29 @@ const deployConfigSchema = z
         enabled: z.boolean().optional(),
         dir: z.string().optional(),
         file: z.string().optional()
+      })
+      .optional(),
+    env: z
+      .object({
+        enabled: z.boolean().optional(),
+        targetFile: z.string().optional(),
+        variables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+        secrets: z
+          .array(
+            z.object({
+              name: z.string(),
+              fromEnv: z.string().optional()
+            })
+          )
+          .optional()
+      })
+      .optional(),
+    dependencies: z
+      .object({
+        enabled: z.boolean().optional(),
+        workingDir: z.string().optional(),
+        commands: z.array(z.string()).optional(),
+        continueOnError: z.boolean().optional()
       })
       .optional(),
     options: z
@@ -220,6 +267,63 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
       })
     : undefined;
 
+  const envEnabled = await readOptionalBoolean({
+    current: config.env?.enabled,
+    interactive,
+    promptMessage: '是否配置 workspace env 文件？',
+    defaultValue: false
+  });
+
+  const envTargetFile = envEnabled
+    ? validateEnvTargetFile(
+        await readStringWithDefault({
+          current: config.env?.targetFile,
+          interactive,
+          promptMessage: '请输入 env 文件路径，默认 .env：',
+          defaultValue: '.env'
+        })
+      )
+    : '.env';
+
+  const envVariables = envEnabled
+    ? {
+        ...parseEnvVariables(config.env?.variables),
+        ...(await readInteractiveEnvVariables({
+          configured: config.env?.variables !== undefined,
+          interactive
+        }))
+      }
+    : {};
+
+  const envSecrets = envEnabled
+    ? [
+        ...parseEnvSecrets(config.env?.secrets),
+        ...(await readInteractiveEnvSecrets({
+          configured: config.env?.secrets !== undefined,
+          interactive
+        }))
+      ]
+    : [];
+
+  const dependenciesEnabled = await readOptionalBoolean({
+    current: config.dependencies?.enabled,
+    interactive,
+    promptMessage: '是否安装 workspace 依赖？',
+    defaultValue: false
+  });
+
+  const dependencyCommands = dependenciesEnabled
+    ? await readDependencyCommands({
+        current: config.dependencies?.commands,
+        interactive
+      })
+    : [];
+
+  const dependencyWorkingDir = validateDependencyWorkingDir(
+    dependenciesEnabled ? config.dependencies?.workingDir : undefined,
+    workspace.trim() || defaultWorkspace
+  );
+
   return {
     sandboxName,
     agentName,
@@ -244,6 +348,18 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
     networkPolicy: {
       enabled: networkPolicyEnabled,
       dir: networkPolicyDir
+    },
+    env: {
+      enabled: envEnabled,
+      targetFile: envTargetFile,
+      variables: envVariables,
+      secrets: envSecrets
+    },
+    dependencies: {
+      enabled: dependenciesEnabled,
+      workingDir: dependencyWorkingDir,
+      commands: dependencyCommands,
+      continueOnError: config.dependencies?.continueOnError ?? false
     },
     options: {
       restart: config.options?.restart ?? true,
@@ -326,6 +442,22 @@ async function readOptionalPath(inputOptions: {
   return path.resolve(value);
 }
 
+async function readStringWithDefault(inputOptions: {
+  current?: string;
+  interactive: boolean;
+  promptMessage: string;
+  defaultValue: string;
+}): Promise<string> {
+  const current = normalizeOptionalString(inputOptions.current);
+  if (current) return current;
+  if (!inputOptions.interactive) return inputOptions.defaultValue;
+
+  return input({
+    message: inputOptions.promptMessage,
+    default: inputOptions.defaultValue
+  });
+}
+
 async function readConflictStrategy(inputOptions: {
   current?: ConflictStrategy;
   interactive: boolean;
@@ -353,4 +485,89 @@ async function readConflictStrategy(inputOptions: {
 function normalizeOptionalString(value?: string | null): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function parseEnvVariables(
+  variables?: Record<string, string | number | boolean>
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [rawName, rawValue] of Object.entries(variables ?? {})) {
+    const name = validateEnvName(rawName);
+    out[name] = validateEnvValue(name, String(rawValue));
+  }
+  return out;
+}
+
+function parseEnvSecrets(secrets?: EnvSecretConfig[]): EnvSecretConfig[] {
+  return (secrets ?? []).map((secret) => {
+    const name = validateEnvName(secret.name);
+    const fromEnv = normalizeOptionalString(secret.fromEnv);
+    if (fromEnv) validateEnvName(fromEnv);
+    return { name, fromEnv };
+  });
+}
+
+async function readInteractiveEnvVariables(inputOptions: {
+  configured: boolean;
+  interactive: boolean;
+}): Promise<Record<string, string>> {
+  if (inputOptions.configured || !inputOptions.interactive) return {};
+
+  const raw = await input({
+    message: '请输入普通 env 变量，格式 KEY=value，多个用逗号分隔，可留空：',
+    default: ''
+  });
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+
+  const out: Record<string, string> = {};
+  for (const pair of trimmed.split(',')) {
+    const index = pair.indexOf('=');
+    if (index <= 0) {
+      throw new Error(`env 变量格式无效: ${pair.trim()}`);
+    }
+    const name = validateEnvName(pair.slice(0, index));
+    out[name] = validateEnvValue(name, pair.slice(index + 1).trim());
+  }
+  return out;
+}
+
+async function readInteractiveEnvSecrets(inputOptions: {
+  configured: boolean;
+  interactive: boolean;
+}): Promise<EnvSecretConfig[]> {
+  if (inputOptions.configured || !inputOptions.interactive) return [];
+
+  const raw = await input({
+    message: '请输入 secret env 名称，多个用逗号分隔，可留空：',
+    default: ''
+  });
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+
+  return trimmed.split(',').map((name) => ({ name: validateEnvName(name) }));
+}
+
+async function readDependencyCommands(inputOptions: {
+  current?: string[];
+  interactive: boolean;
+}): Promise<string[]> {
+  if (inputOptions.current !== undefined) {
+    const commands = inputOptions.current.map(validateDependencyCommand);
+    if (commands.length === 0) {
+      throw new Error('dependencies.commands 至少需要一个命令');
+    }
+    return commands;
+  }
+
+  if (!inputOptions.interactive) {
+    throw new Error('dependencies.commands 是必填字段');
+  }
+
+  const raw = await input({
+    message: '请输入依赖安装命令，例如 npm install：',
+    validate: (value) => (value.trim() ? true : 'dependencies.commands 是必填字段')
+  });
+
+  return [validateDependencyCommand(raw)];
 }

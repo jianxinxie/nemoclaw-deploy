@@ -15,6 +15,8 @@ export function maskSensitiveText(input: string, secrets: string[] = []): string
 
   output = output.replace(/("gatewayToken"\s*:\s*")([^"]+)(")/gi, '$1******$3');
   output = output.replace(/(GATEWAY_TOKEN=)([^\s'"]+)/g, '$1******');
+  output = output.replace(/\bnpm_[A-Za-z0-9]{20,}\b/g, 'npm_******');
+  output = output.replace(/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD)[A-Z0-9_]*=)([^\s'"]+)/gi, '$1******');
   output = output.replace(/([?&#]token=)([^&#\s]+)/gi, '$1******');
 
   return output;

@@ -9,7 +9,7 @@ const program = new Command();
 program
   .name('nemoclaw-deploy')
   .description('Safely deploy OpenClaw agents into an existing NemoClaw sandbox.')
-  .version('0.1.0')
+  .version('0.2.0')
   .action(() => runAction(() => deployCommand({})));
 
 program

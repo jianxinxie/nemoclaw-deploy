@@ -7,6 +7,8 @@ import { uploadAgentContent } from '../core/upload-agent-content.js';
 import { installSkill } from '../core/install-skill.js';
 import { configureChannel } from '../core/configure-channel.js';
 import { applyPolicy } from '../core/apply-policy.js';
+import { configureEnv } from '../core/configure-env.js';
+import { installDependencies } from '../core/install-dependencies.js';
 import { verifyDeployment } from '../core/verify.js';
 import { logger } from '../utils/logger.js';
 import { maskSecret } from '../utils/mask.js';
@@ -26,6 +28,15 @@ interface DeploySummary {
   };
   networkPolicy: {
     status: 'skipped' | 'applied';
+    count: number;
+  };
+  env: {
+    status: 'skipped' | 'configured';
+    targetFile?: string;
+    count: number;
+  };
+  dependencies: {
+    status: 'skipped' | 'installed' | 'partial';
     count: number;
   };
 }
@@ -56,7 +67,9 @@ export async function deployCommand(options: DeployCliOptions): Promise<void> {
     agentContent: 'skipped',
     skill: { status: 'skipped', count: 0 },
     channel: { status: 'skipped', restarted: false, reason: 'disabled' },
-    networkPolicy: { status: 'skipped', count: 0 }
+    networkPolicy: { status: 'skipped', count: 0 },
+    env: { status: 'skipped', count: 0 },
+    dependencies: { status: 'skipped', count: 0 }
   };
   let remoteTempCleaned = false;
   let remoteTempMayExist = false;
@@ -88,10 +101,19 @@ export async function deployCommand(options: DeployCliOptions): Promise<void> {
     logger.info('扫描 network policy 目录下的 .yaml/.yml 文件，并逐个执行 policy-add。');
     summary.networkPolicy = await applyPolicy(ctx);
 
+    logger.step('配置 workspace env...');
+    logger.info('把配置中的普通变量和 secret 合并写入 workspace env 文件，不写入 sandbox 全局环境。');
+    remoteTempMayExist ||= ctx.env.enabled;
+    summary.env = await configureEnv(ctx);
+
+    logger.step('安装 workspace 依赖...');
+    logger.info('在 agent workspace 中执行依赖安装命令，依赖是否可联网由当前 network policy 决定。');
+    summary.dependencies = await installDependencies(ctx);
+
     const needsRecover =
       ctx.options.restart &&
-      (summary.networkPolicy.status === 'applied' ||
-        (summary.channel.status === 'configured' && !summary.channel.restarted));
+      summary.channel.status === 'configured' &&
+      !summary.channel.restarted;
 
     logger.step('执行基础验证...');
     logger.info('确认 agent 可在列表中看到，sandbox status 可读取，并检查 channel/policy 的关键结果。');
@@ -105,7 +127,7 @@ export async function deployCommand(options: DeployCliOptions): Promise<void> {
       logger.info('基础部署已完成；现在后台触发 sandbox recover，不等待 recover 完成。');
       await runCommand('nemoclaw', [ctx.sandboxName, 'recover'], {
         background: true,
-        description: '后台重启/恢复 sandbox，使新配置和 network policy 生效'
+        description: '后台重启/恢复 sandbox，使 channel 配置生效'
       });
     }
 
@@ -137,15 +159,40 @@ function printPlan(ctx: DeployContext): void {
     `Channel: ${ctx.channel.enabled ? `${ctx.channel.type}/${ctx.channel.accountId}` : 'disabled'}`
   );
   logger.info(`Channel Server URL: ${ctx.channel.channelServerUrl || '-'}`);
-  logger.info(`Gateway URL: ${ctx.channel.gatewayUrl ?? 'auto from dashboard-url'}`);
   logger.info(
-    `Gateway Token: ${ctx.channel.gatewayToken ? maskSecret(ctx.channel.gatewayToken) : 'auto from gateway-token'}`
+    `Gateway URL: ${ctx.channel.enabled ? (ctx.channel.gatewayUrl ?? 'auto from dashboard-url') : '-'}`
+  );
+  logger.info(
+    `Gateway Token: ${
+      ctx.channel.enabled
+        ? ctx.channel.gatewayToken
+          ? maskSecret(ctx.channel.gatewayToken)
+          : 'auto from gateway-token'
+        : '-'
+    }`
   );
   logger.info('');
   logger.info(`Network Policy: ${ctx.networkPolicy.enabled ? 'enabled' : 'disabled'}`);
   logger.info(`Policy Dir: ${ctx.networkPolicy.dir ?? '-'}`);
   logger.info('');
+  logger.info(`Env: ${ctx.env.enabled ? 'enabled' : 'disabled'}`);
+  logger.info(`Env Target File: ${ctx.env.enabled ? ctx.env.targetFile : '-'}`);
+  logger.info(`Env Variables: ${Object.keys(ctx.env.variables).sort().join(', ') || '-'}`);
+  logger.info(
+    `Env Secrets: ${
+      ctx.env.secrets
+        .map((secret) => (secret.fromEnv ? `${secret.name} from ${secret.fromEnv}` : `${secret.name} from prompt`))
+        .join(', ') || '-'
+    }`
+  );
+  logger.info('');
+  logger.info(`Dependencies: ${ctx.dependencies.enabled ? 'enabled' : 'disabled'}`);
+  logger.info(`Dependencies Workdir: ${ctx.dependencies.enabled ? ctx.dependencies.workingDir : '-'}`);
+  logger.info(`Dependencies Commands: ${ctx.dependencies.commands.join(' && ') || '-'}`);
+  logger.info(`Dependencies Continue On Error: ${ctx.dependencies.continueOnError}`);
+  logger.info('');
   logger.info(`Restart / Recover: ${ctx.options.restart ? 'enabled' : 'disabled'}`);
+  logger.info('Recover Trigger: channel config only; network policy applies live');
   logger.info('');
 }
 
@@ -180,6 +227,16 @@ function printSummary(ctx: DeployContext, summary: DeploySummary): void {
   logger.info(
     `Network Policy: ${summary.networkPolicy.status}${
       summary.networkPolicy.status === 'applied' ? ` (${summary.networkPolicy.count})` : ''
+    }`
+  );
+  logger.info(
+    `Env: ${summary.env.status}${
+      summary.env.status === 'configured' ? ` (${summary.env.count} keys -> ${summary.env.targetFile})` : ''
+    }`
+  );
+  logger.info(
+    `Dependencies: ${summary.dependencies.status}${
+      summary.dependencies.status !== 'skipped' ? ` (${summary.dependencies.count})` : ''
     }`
   );
   logger.info('');
