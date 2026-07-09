@@ -1,3 +1,3 @@
 # Memory
 
-Store seed memory notes here.
+Seed memory notes can be added here.

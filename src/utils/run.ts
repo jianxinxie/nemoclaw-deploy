@@ -11,6 +11,12 @@ export interface RunCommandOptions {
   description?: string;
   displayCommand?: string;
   background?: boolean;
+  /**
+   * 丢弃子进程输出，只等待进程退出。
+   * 用于会派生长驻子进程的命令（例如 nemoclaw gateway restart），
+   * 否则子进程继承的输出管道不关闭，等待会一直挂住。
+   */
+  ignoreOutput?: boolean;
 }
 
 export interface RunCommandResult {
@@ -65,8 +71,8 @@ export async function runCommand(
       timeout: options.timeoutMs,
       forceKillAfterDelay: options.timeoutMs ? 2_000 : false,
       stdin: 'ignore',
-      stdout: 'pipe',
-      stderr: 'pipe',
+      stdout: options.ignoreOutput ? 'ignore' : 'pipe',
+      stderr: options.ignoreOutput ? 'ignore' : 'pipe',
       env: {
         ...process.env,
         NO_COLOR: '1',
@@ -75,8 +81,8 @@ export async function runCommand(
       }
     });
 
-    const stdout = maskSensitiveText(result.stdout, secrets);
-    const stderr = maskSensitiveText(result.stderr, secrets);
+    const stdout = maskSensitiveText(result.stdout ?? '', secrets);
+    const stderr = maskSensitiveText(result.stderr ?? '', secrets);
     const exitCode = result.exitCode ?? 0;
     const timedOut = (result as { timedOut?: boolean }).timedOut ?? false;
 
@@ -122,9 +128,10 @@ function collectSecrets(args: string[], env?: Record<string, string>): string[] 
       secrets.add(envAssignment[2]);
     }
 
-    const jsonToken = arg.match(/"gatewayToken"\s*:\s*"([^"]+)"/i);
-    if (jsonToken?.[1]) {
-      secrets.add(jsonToken[1]);
+    for (const jsonSecret of arg.matchAll(/"(?:gatewayToken|secret)"\s*:\s*"([^"]+)"/gi)) {
+      if (jsonSecret[1]) {
+        secrets.add(jsonSecret[1]);
+      }
     }
   }
 

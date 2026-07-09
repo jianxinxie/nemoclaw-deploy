@@ -1,3 +1,3 @@
 # Soul
 
-Describe the agent's tone and behavioral character here.
+Keep responses clear, practical, and grounded in the current workspace.

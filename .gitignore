@@ -19,6 +19,10 @@ pnpm-debug.log*
 coverage/
 .nyc_output/
 
+# Python cache
+__pycache__/
+*.py[cod]
+
 # Local environment and secrets
 .env
 .env.*

@@ -69,20 +69,12 @@ export async function configureChannel(ctx: DeployContext): Promise<ConfigureCha
     JSON.stringify(advbotConfig)
   ];
 
-  const restartWithConfigSet = ctx.options.restart && !ctx.networkPolicy.enabled;
-  let restarted = false;
-
-  if (restartWithConfigSet) {
-    args.push('--restart');
-  }
-
   try {
     await runCommand('nemoclaw', args, {
       dryRun: ctx.options.dryRun,
       sensitive: true,
       description: '写入 channels.advbot 配置，包含 channel server、gateway URL 和脱敏 token'
     });
-    restarted = restartWithConfigSet;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     logger.warn(`config set 失败，改用 patch 脚本方式。${detail}`);
@@ -90,7 +82,7 @@ export async function configureChannel(ctx: DeployContext): Promise<ConfigureCha
   }
 
   logger.info(`Gateway Token: ${maskSecret(gatewayToken)}`);
-  return { status: 'configured', restarted };
+  return { status: 'configured', restarted: false };
 }
 
 export async function ensureAdvbotPluginConfig(ctx: DeployContext): Promise<void> {
@@ -103,7 +95,7 @@ export async function ensureAdvbotPluginConfig(ctx: DeployContext): Promise<void
     {
       dryRun: ctx.options.dryRun,
       timeoutMs: 30_000,
-      description: '确保 OpenClaw 已启用 advbot plugin，并加入 plugins.allow',
+      description: '确保 OpenClaw 已启用 advbot plugin',
       displayCommand: `nemoclaw ${ctx.sandboxName} exec -- node -e <patch-advbot-plugin-config>`
     }
   );
@@ -355,13 +347,6 @@ config.plugins.entries.advbot = {
       : {}
 };
 
-if (!Array.isArray(config.plugins.allow)) {
-  config.plugins.allow = [];
-}
-if (!config.plugins.allow.includes('advbot')) {
-  config.plugins.allow.push('advbot');
-}
-
 config.channels ??= {};
 config.channels.advbot ??= {};
 config.channels.advbot.enabled = true;
@@ -400,13 +385,6 @@ config.plugins.entries.advbot = {
       : {}
 };
 
-if (!Array.isArray(config.plugins.allow)) {
-  config.plugins.allow = [];
-}
-if (!config.plugins.allow.includes('advbot')) {
-  config.plugins.allow.push('advbot');
-}
-
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 `;
 
@@ -432,7 +410,6 @@ try {
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   const plugins = config.plugins || {};
   const pluginEntry = plugins.entries && plugins.entries.advbot;
-  const pluginAllowed = Array.isArray(plugins.allow) && plugins.allow.includes('advbot');
   const advbot = config.channels && config.channels.advbot;
   const account = advbot && advbot.accounts && advbot.accounts[accountId];
 
@@ -449,7 +426,6 @@ try {
     advbot.enabled === true &&
     pluginEntry &&
     pluginEntry.enabled === true &&
-    pluginAllowed &&
     account.enabled === true &&
     channelServerUrl === desiredChannelServerUrl &&
     Boolean(gatewayToken) &&

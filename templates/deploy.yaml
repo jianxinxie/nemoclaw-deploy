@@ -1,10 +1,14 @@
+# Python workspace 部署示例。
+# 这个模板会创建/确认 agent，上传 agent-content，安装 skills，写入 workspace .env，
+# 在 workspace 下创建共享 .venv，并按需安装 requirements.txt。
+
 # NemoClaw sandbox 名称，必填。
 # 可选值：已存在的 sandbox 名称，例如 demo。
 sandboxName: demo
 
 # OpenClaw agent 名称，必填。
 # 可选值：小写字母开头，最多 32 位，只能包含小写字母、数字、下划线、短横线。
-agentName: my-agent
+agentName: python-agent
 
 # agent workspace。
 # 留空时默认：/sandbox/.openclaw/workspace-${agentName}
@@ -28,6 +32,22 @@ agentContent:
   #   fail      发现冲突即失败
   conflictStrategy: ask
 
+  # 忽略规则（可选）：匹配到的目录/文件不会上传（在本机过滤，不会进入 sandbox）。
+  # 语义（简化版 .gitignore，不支持 ! 取反）：
+  #   node_modules     任意层级下名为 node_modules 的目录或文件
+  #   "*.log"          任意层级下的 .log 文件（* 开头需要加引号）
+  #   secrets/         末尾 / 表示只匹配目录
+  #   docs/draft.md    含 / 的模式相对 hostDir 根路径匹配
+  #   "data/**"        data 目录下所有内容
+  ignore:
+    - .git
+    - node_modules
+    - "*.log"
+    - .venv
+    - __pycache__
+    - .pytest_cache
+    - "*.pyc"
+
 skill:
   # 是否安装 skill。
   # 可选值：true / false
@@ -37,6 +57,75 @@ skill:
   # CLI 会安装该目录下所有包含 SKILL.md 的子目录。
   # 如果该目录本身包含 SKILL.md，也会按单个 skill 安装。
   hostDir: ./skills
+
+plugins:
+  # 是否安装并启用 OpenClaw 插件。
+  # 可选值：true / false
+  # 每个插件会依次完成：安装（缺失时）→ 在 openclaw.json 中启用 → 写入 channel 配置（如果有）。
+  enabled: false
+
+  # 插件列表。
+  # id      插件真实 id，用于启用，建议以 openclaw plugins list --json 输出为准，
+  #         例如 wecom-openclaw-plugin、advbot。
+  # channelId
+  #         channel plugin 暴露的 channel id（可选），例如企业微信插件的真实插件 id 是
+  #         wecom-openclaw-plugin，但 channel id 是 wecom。
+  # source  安装来源，支持：
+  #           本机路径（./、../、/ 或 ~/ 开头，目录或 .zip/.tgz/.js/.ts 文件，会先上传到 sandbox 临时目录）
+  #           npm spec（例如 "@wecom/wecom-openclaw-plugin"、"@openclaw/qqbot"，@ 开头需要加引号）
+  #           clawhub:package（例如 "clawhub:@wecom/wecom-openclaw-plugin"）
+  #           marketplace 插件名称
+  #         留空表示插件已内置或已安装，只做启用和 channel 配置。
+  # force   已安装时是否强制重装（--force）。可选，默认 false。
+  # channel channel plugin 的 channels.<channelId 或 id> 配置（可选），会深合并写入 openclaw.json：
+  #         对象字段递归合并，已有的其他 account 会保留；数组和标量直接覆盖。
+  #         顶层 enabled 缺省时自动设为 true。
+  #         不要把真实 secret 提交到版本库。
+  # 注意：npm/clawhub 来源在 sandbox 内下载，需要 network policy 放行对应源
+  #（npm 在默认 policy 中通常已放行，clawhub 需要额外放行）。
+  items:
+    - id: wecom-openclaw-plugin
+      channelId: wecom
+      source: "@wecom/wecom-openclaw-plugin"
+      channel:
+        enabled: true
+        defaultAccount: default
+        dmPolicy: open
+        allowFrom: ["*"]
+        groupAllowFrom: ["*"]
+        accounts:
+          default:
+            enabled: true
+            botId: your-bot-id
+            secret: your-bot-secret
+            connectionMode: websocket
+            websocketUrl: wss://openws.work.weixin.qq.com
+            dmPolicy: open
+            allowFrom: ["*"]
+            groupPolicy: open
+            groupAllowFrom: ["*"]
+    - id: advbot
+      source: "@advantech-axa/advbot"
+
+tools:
+  # 是否配置 OpenClaw tools 段。
+  # 可选值：true / false
+  # 会设置 tools.profile，并深合并 config 中的内容；已有的 toolSearch/web 等配置保持不变。
+  enabled: true
+
+  # tools.profile 值，默认 coding。
+  profile: coding
+
+  # 需要额外深合并进 tools 的配置（可选）。
+  # 示例：
+  #     mode: tools
+  #     searchDefaultLimit: 8
+  #     maxSearchLimit: 20
+  #   web:
+  #     fetch:
+  #       enabled: true
+  #       useTrustedEnvProxy: true
+  config: {}
 
 channel:
   # 是否配置 advbot channel。
@@ -53,7 +142,7 @@ channel:
 
   # advbot channel server 地址。
   # 可选值：http://... 或 https://...
-  channelServerUrl: http://127.0.0.1:8080
+  channelServerUrl: http://127.0.0.1:8086
 
   # OpenClaw gateway token。
   # 留空时自动执行：nemoclaw <sandboxName> gateway-token --quiet
@@ -68,7 +157,7 @@ channel:
 networkPolicy:
   # 是否应用 network policy。
   # 可选值：true / false
-  # policy-add 写入 live policy，应用后不需要 recover。
+  # policy-add 写入 live policy，应用后不需要重启 gateway。
   enabled: true
 
   # 本机 network policy 目录或单个 .yaml/.yml 文件。
@@ -79,29 +168,31 @@ env:
   # 是否写入 workspace env 文件。
   # 可选值：true / false
   # 作用范围：当前 agent workspace，不是 sandbox 全局环境。
-  enabled: false
+  # 启用后 CLI 会自动写入：
+  #   WORKSPACE=/sandbox/.openclaw/workspace-${agentName}
+  #   VIRTUAL_ENV=${WORKSPACE}/.venv
+  #   PYTHON=${WORKSPACE}/.venv/bin/python
+  # OpenClaw 会加载 workspace .env 中的普通项目变量。
+  # skill 中可直接执行：
+  #   "$PYTHON" demo.py
+  enabled: true
 
   # env 文件路径，相对 workspace。
   # 可选值：.env、.env.local、config/.env 等；不能是绝对路径或 ../。
   targetFile: .env
 
   # 普通 env 变量。
-  # 这些值会写入 ${workspace}/${targetFile}。
+  # 这些值会写入 ${workspace}/${targetFile}，并可覆盖上面的自动默认值。
   variables:
-    NODE_ENV: production
-
-  # secret env 变量。
-  # name 是写入 .env 的变量名，fromEnv 是本机环境变量名。
-  # 运行前需要先 export API_TOKEN=xxx。
-  # 不建议把真实 secret 直接写进 variables。
-  secrets:
-    - name: API_TOKEN
-      fromEnv: API_TOKEN
+    APP_ENV: production
+    PYTHONUNBUFFERED: "1"
+    PYTHONDONTWRITEBYTECODE: "1"
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 dependencies:
   # 是否安装 workspace 依赖。
   # 可选值：true / false
-  enabled: false
+  enabled: true
 
   # 依赖命令执行目录。
   # 留空时默认 workspace。
@@ -109,22 +200,28 @@ dependencies:
   workingDir: ""
 
   # 依赖安装命令，按顺序执行。
-  # 常见可选值：
-  #   - npm install
-  #   - npm ci
-  #   - pnpm install
-  #   - yarn install
-  #   - pip install -r requirements.txt
-  #   - uv sync
+  # Python 推荐：
+  #   1. 在 workspace 下创建共享 .venv。
+  #   2. 使用 CLI 自动注入的 $PYTHON 指向 ${workspace}/.venv/bin/python。
+  #   3. 如果 workspace 中存在 requirements.txt，则安装依赖。
+  # 如需从 PyPI 下载包，请确保当前 network policy 放行对应源。
   commands:
-    - npm install
+    - python3 -m venv "$VIRTUAL_ENV"
+    - '"$PYTHON" -m pip --version'
+    - >
+      if [ -f requirements.txt ]; then
+        "$PYTHON" -m pip install -r requirements.txt;
+      else
+        echo "requirements.txt not found, skip pip install";
+      fi
 
   # 某条依赖命令失败后是否继续执行后续命令。
   # 可选值：true / false
   continueOnError: false
 
 options:
-  # 是否允许工具在需要时触发后台 recover。
+  # 是否在部署最后重启 OpenClaw 网关（nemoclaw <sandboxName> gateway restart）。
   # 可选值：true / false
-  # 当前只有 channel 配置需要重新加载时才会触发；network policy 不会触发 recover。
-  restart: true
+  # 插件安装、plugins.allow 和 channel 配置都需要网关重启后才生效。
+  # 这一步在部署结束时前台执行并等待完成。
+  restartGateway: false

@@ -28,10 +28,13 @@ export async function installDependencies(
           'exec',
           '--',
           'env',
+          `WORKSPACE=${ctx.workspace}`,
+          `VIRTUAL_ENV=${ctx.workspace}/.venv`,
+          `PYTHON=${ctx.workspace}/.venv/bin/python`,
           `DEPENDENCIES_WORKDIR=${ctx.dependencies.workingDir}`,
           'sh',
           '-lc',
-          `cd "$DEPENDENCIES_WORKDIR" && ${command}`
+          `cd "$DEPENDENCIES_WORKDIR" && export PATH="$VIRTUAL_ENV/bin:$PATH" && ${command}`
         ],
         {
           dryRun: ctx.options.dryRun,

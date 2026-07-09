@@ -20,7 +20,7 @@ export async function precheck(ctx: DeployContext): Promise<void> {
     throw new Error(
       [
         'sandbox 不可用，请先确认 sandbox 已创建并运行。',
-        `可尝试执行：nemoclaw ${ctx.sandboxName} recover`,
+        `可尝试执行：nemoclaw ${ctx.sandboxName} gateway restart`,
         detail
       ].join('\n')
     );

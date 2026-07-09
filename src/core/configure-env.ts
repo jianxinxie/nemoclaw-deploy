@@ -1,12 +1,10 @@
 import os from 'node:os';
 import path from 'node:path';
-import { password } from '@inquirer/prompts';
 import fs from 'fs-extra';
-import type { DeployContext, EnvSecretConfig } from './context.js';
+import type { DeployContext } from './context.js';
 import { remoteTempBase } from './upload-agent-content.js';
 import { logger } from '../utils/logger.js';
 import { runCommand } from '../utils/run.js';
-import { validateEnvValue } from '../utils/validators.js';
 
 export interface ConfigureEnvResult {
   status: 'skipped' | 'configured';
@@ -17,10 +15,10 @@ export interface ConfigureEnvResult {
 export async function configureEnv(ctx: DeployContext): Promise<ConfigureEnvResult> {
   if (!ctx.env.enabled) return { status: 'skipped', count: 0 };
 
-  const variables = await resolveEnvVariables(ctx);
+  const variables = resolveEnvVariables(ctx);
   const entries = Object.keys(variables).sort();
   if (entries.length === 0) {
-    throw new Error('env 已启用，但没有配置 variables 或 secrets');
+    throw new Error('env 已启用，但没有配置 variables');
   }
 
   const remoteBase = remoteTempBase(ctx);
@@ -72,41 +70,20 @@ export async function configureEnv(ctx: DeployContext): Promise<ConfigureEnvResu
     );
 
     logger.info(`已写入 ${entries.length} 个 env key: ${entries.join(', ')}`);
+    logger.info('OpenClaw 会从 workspace .env 加载普通项目变量，skill 可直接使用 $PYTHON。');
     return { status: 'configured', targetFile: ctx.env.targetFile, count: entries.length };
   } finally {
     await fs.remove(tempDir);
   }
 }
 
-async function resolveEnvVariables(ctx: DeployContext): Promise<Record<string, string>> {
-  const variables: Record<string, string> = { ...ctx.env.variables };
-
-  for (const secret of ctx.env.secrets) {
-    const value = await resolveSecretValue(secret, ctx.options.nonInteractive);
-    variables[secret.name] = validateEnvValue(secret.name, value);
-  }
-
-  return variables;
-}
-
-async function resolveSecretValue(secret: EnvSecretConfig, nonInteractive: boolean): Promise<string> {
-  if (secret.fromEnv) {
-    const value = process.env[secret.fromEnv];
-    if (value !== undefined && value !== '') return value;
-    if (nonInteractive) {
-      throw new Error(`env secret ${secret.name} 需要本机环境变量 ${secret.fromEnv}`);
-    }
-    logger.warn(`本机环境变量 ${secret.fromEnv} 为空，将改为交互输入 ${secret.name}。`);
-  } else if (nonInteractive) {
-    throw new Error(`env secret ${secret.name} 在非交互模式下必须配置 fromEnv`);
-  }
-
-  const value = await password({
-    message: `请输入 ${secret.name}：`,
-    mask: '*',
-    validate: (candidate) => (candidate ? true : `${secret.name} 不能为空`)
-  });
-  return value;
+function resolveEnvVariables(ctx: DeployContext): Record<string, string> {
+  return {
+    WORKSPACE: ctx.workspace,
+    VIRTUAL_ENV: `${ctx.workspace}/.venv`,
+    PYTHON: `${ctx.workspace}/.venv/bin/python`,
+    ...ctx.env.variables
+  };
 }
 
 const MERGE_ENV_SCRIPT = `

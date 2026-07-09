@@ -16,6 +16,10 @@ export const envNameSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, {
   message: 'env 变量名必须以字母或下划线开头，只能包含字母、数字和下划线'
 });
 
+export const pluginIdSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/i, {
+  message: 'plugin id 必须以字母或数字开头，只能包含字母、数字、点、下划线和短横线，最长 64 位'
+});
+
 export function stripAngleBrackets(value: string): string {
   const trimmed = value.trim();
   if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
@@ -34,6 +38,59 @@ export function validateAgentName(value: string): string {
 
 export function validateEnvName(value: string): string {
   return envNameSchema.parse(value.trim());
+}
+
+export function validatePluginId(value: string): string {
+  return pluginIdSchema.parse(value.trim());
+}
+
+export function validatePluginSource(value: string): string {
+  const source = value.trim();
+  if (!source) {
+    throw new Error('plugins.items[].source 不能为空字符串');
+  }
+  if (source.includes('\0') || /\s/.test(source)) {
+    throw new Error(`plugins.items[].source 不能包含空白字符: ${source}`);
+  }
+  if (source.startsWith('-')) {
+    throw new Error(`plugins.items[].source 不能以 - 开头: ${source}`);
+  }
+  return source;
+}
+
+export const toolsProfileSchema = z.string().regex(/^[a-zA-Z0-9._-]{1,64}$/, {
+  message: 'tools.profile 只能包含字母、数字、点、下划线和短横线，最长 64 位'
+});
+
+export function validateToolsProfile(value: string): string {
+  return toolsProfileSchema.parse(value.trim());
+}
+
+export function validateIgnorePattern(value: string): string {
+  const pattern = value.trim();
+  if (!pattern) {
+    throw new Error('agentContent.ignore 不能包含空模式');
+  }
+  if (pattern.includes('\0')) {
+    throw new Error(`agentContent.ignore 模式不能包含空字符: ${pattern}`);
+  }
+  if (pattern.startsWith('/')) {
+    throw new Error(`agentContent.ignore 模式必须是相对 hostDir 的路径，不能以 / 开头: ${pattern}`);
+  }
+  if (pattern === '..' || pattern.startsWith('../') || pattern.includes('/../')) {
+    throw new Error(`agentContent.ignore 模式不能包含 ..: ${pattern}`);
+  }
+  return pattern;
+}
+
+export function isPluginHostPathSource(source: string): boolean {
+  return (
+    source === '.' ||
+    source.startsWith('./') ||
+    source.startsWith('../') ||
+    source.startsWith('/') ||
+    source.startsWith('~/')
+  );
 }
 
 export function validateChannelServerUrl(value: string): string {

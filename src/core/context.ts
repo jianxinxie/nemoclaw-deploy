@@ -1,3 +1,4 @@
+import os from 'node:os';
 import path from 'node:path';
 import { confirm, input, select } from '@inquirer/prompts';
 import { z } from 'zod';
@@ -5,6 +6,7 @@ import { resolveFromBase } from '../utils/fs.js';
 import { readYamlFile } from '../utils/yaml.js';
 import {
   conflictStrategySchema,
+  isPluginHostPathSource,
   validateAgentName,
   validateChannelServerUrl,
   validateDependencyCommand,
@@ -13,14 +15,22 @@ import {
   validateEnvTargetFile,
   validateEnvValue,
   validateGatewayUrl,
-  validateSandboxName
+  validateIgnorePattern,
+  validatePluginId,
+  validatePluginSource,
+  validateSandboxName,
+  validateToolsProfile
 } from '../utils/validators.js';
 
 export type ConflictStrategy = 'ask' | 'skip' | 'backup' | 'overwrite' | 'fail';
 
-export interface EnvSecretConfig {
-  name: string;
-  fromEnv?: string;
+export interface PluginItemConfig {
+  id: string;
+  channelId?: string;
+  source?: string;
+  sourceKind: 'path' | 'spec' | 'none';
+  force: boolean;
+  channel?: Record<string, unknown>;
 }
 
 export interface DeployContext {
@@ -32,11 +42,23 @@ export interface DeployContext {
     enabled: boolean;
     hostDir?: string;
     conflictStrategy: ConflictStrategy;
+    ignore: string[];
   };
 
   skill: {
     enabled: boolean;
     hostDir?: string;
+  };
+
+  plugins: {
+    enabled: boolean;
+    items: PluginItemConfig[];
+  };
+
+  tools: {
+    enabled: boolean;
+    profile: string;
+    config: Record<string, unknown>;
   };
 
   channel: {
@@ -57,7 +79,6 @@ export interface DeployContext {
     enabled: boolean;
     targetFile: string;
     variables: Record<string, string>;
-    secrets: EnvSecretConfig[];
   };
 
   dependencies: {
@@ -68,7 +89,7 @@ export interface DeployContext {
   };
 
   options: {
-    restart: boolean;
+    restartGateway: boolean;
     nonInteractive: boolean;
     dryRun: boolean;
   };
@@ -89,13 +110,37 @@ const deployConfigSchema = z
       .object({
         enabled: z.boolean().optional(),
         hostDir: z.string().optional(),
-        conflictStrategy: conflictStrategySchema.optional()
+        conflictStrategy: conflictStrategySchema.optional(),
+        ignore: z.array(z.string()).optional()
       })
       .optional(),
     skill: z
       .object({
         enabled: z.boolean().optional(),
         hostDir: z.string().optional()
+      })
+      .optional(),
+    plugins: z
+      .object({
+        enabled: z.boolean().optional(),
+        items: z
+          .array(
+            z.object({
+              id: z.string(),
+              channelId: z.string().optional(),
+              source: z.string().optional().nullable(),
+              force: z.boolean().optional(),
+              channel: z.record(z.string(), z.unknown()).optional()
+            })
+          )
+          .optional()
+      })
+      .optional(),
+    tools: z
+      .object({
+        enabled: z.boolean().optional(),
+        profile: z.string().optional(),
+        config: z.record(z.string(), z.unknown()).optional()
       })
       .optional(),
     channel: z
@@ -119,15 +164,7 @@ const deployConfigSchema = z
       .object({
         enabled: z.boolean().optional(),
         targetFile: z.string().optional(),
-        variables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
-        secrets: z
-          .array(
-            z.object({
-              name: z.string(),
-              fromEnv: z.string().optional()
-            })
-          )
-          .optional()
+        variables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
       })
       .optional(),
     dependencies: z
@@ -140,7 +177,7 @@ const deployConfigSchema = z
       .optional(),
     options: z
       .object({
-        restart: z.boolean().optional()
+        restartGateway: z.boolean().optional()
       })
       .optional()
   })
@@ -211,6 +248,14 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
       })
     : config.agentContent?.conflictStrategy ?? (interactive ? 'ask' : 'fail');
 
+  const agentContentIgnore = agentContentEnabled
+    ? await readAgentContentIgnore({
+        current: config.agentContent?.ignore,
+        configured: config.agentContent !== undefined,
+        interactive
+      })
+    : [];
+
   const skillEnabled = await readOptionalBoolean({
     current: config.skill?.enabled,
     interactive,
@@ -227,6 +272,39 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
         promptMessage: '请输入 skills 主机目录：'
       })
     : undefined;
+
+  const pluginsEnabled = await readOptionalBoolean({
+    current: config.plugins?.enabled,
+    interactive,
+    promptMessage: '是否安装并启用 OpenClaw 插件？',
+    defaultValue: false
+  });
+
+  const pluginItems = pluginsEnabled
+    ? await readPluginItems({
+        current: config.plugins?.items,
+        configBaseDir,
+        interactive
+      })
+    : [];
+
+  const toolsEnabled = await readOptionalBoolean({
+    current: config.tools?.enabled,
+    interactive,
+    promptMessage: '是否配置 OpenClaw tools（默认设置 tools.profile=coding）？',
+    defaultValue: true
+  });
+
+  const toolsProfile = toolsEnabled
+    ? validateToolsProfile(
+        await readStringWithDefault({
+          current: config.tools?.profile,
+          interactive,
+          promptMessage: '请输入 tools.profile，默认 coding：',
+          defaultValue: 'coding'
+        })
+      )
+    : 'coding';
 
   const channelEnabled = await readOptionalBoolean({
     current: config.channel?.enabled,
@@ -295,16 +373,6 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
       }
     : {};
 
-  const envSecrets = envEnabled
-    ? [
-        ...parseEnvSecrets(config.env?.secrets),
-        ...(await readInteractiveEnvSecrets({
-          configured: config.env?.secrets !== undefined,
-          interactive
-        }))
-      ]
-    : [];
-
   const dependenciesEnabled = await readOptionalBoolean({
     current: config.dependencies?.enabled,
     interactive,
@@ -331,11 +399,21 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
     agentContent: {
       enabled: agentContentEnabled,
       hostDir: agentContentHostDir,
-      conflictStrategy: agentContentConflictStrategy
+      conflictStrategy: agentContentConflictStrategy,
+      ignore: agentContentIgnore
     },
     skill: {
       enabled: skillEnabled,
       hostDir: skillHostDir
+    },
+    plugins: {
+      enabled: pluginsEnabled,
+      items: pluginItems
+    },
+    tools: {
+      enabled: toolsEnabled,
+      profile: toolsProfile,
+      config: config.tools?.config ?? {}
     },
     channel: {
       enabled: channelEnabled,
@@ -352,8 +430,7 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
     env: {
       enabled: envEnabled,
       targetFile: envTargetFile,
-      variables: envVariables,
-      secrets: envSecrets
+      variables: envVariables
     },
     dependencies: {
       enabled: dependenciesEnabled,
@@ -362,7 +439,7 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
       continueOnError: config.dependencies?.continueOnError ?? false
     },
     options: {
-      restart: config.options?.restart ?? true,
+      restartGateway: config.options?.restartGateway ?? false,
       nonInteractive: Boolean(options.nonInteractive),
       dryRun: Boolean(options.dryRun)
     }
@@ -371,11 +448,28 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
 
 async function loadDeployConfig(configPath: string): Promise<DeployConfigInput> {
   const raw = await readYamlFile(configPath);
+  assertRemovedConfigFields(raw);
   const result = deployConfigSchema.safeParse(raw ?? {});
   if (!result.success) {
     throw new Error(`deploy config 格式无效: ${result.error.message}`);
   }
   return result.data;
+}
+
+function assertRemovedConfigFields(raw: unknown): void {
+  if (!isPlainRecord(raw)) return;
+
+  if (isPlainRecord(raw.env) && Object.prototype.hasOwnProperty.call(raw.env, 'secrets')) {
+    throw new Error('deploy config 字段 env.secrets 已移除，请删除该字段；secret 请通过运行环境或平台能力注入。');
+  }
+
+  if (isPlainRecord(raw.options) && Object.prototype.hasOwnProperty.call(raw.options, 'restart')) {
+    throw new Error('deploy config 字段 options.restart 已移除，请改用 options.restartGateway。');
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 async function readRequiredString(inputOptions: {
@@ -498,15 +592,6 @@ function parseEnvVariables(
   return out;
 }
 
-function parseEnvSecrets(secrets?: EnvSecretConfig[]): EnvSecretConfig[] {
-  return (secrets ?? []).map((secret) => {
-    const name = validateEnvName(secret.name);
-    const fromEnv = normalizeOptionalString(secret.fromEnv);
-    if (fromEnv) validateEnvName(fromEnv);
-    return { name, fromEnv };
-  });
-}
-
 async function readInteractiveEnvVariables(inputOptions: {
   configured: boolean;
   interactive: boolean;
@@ -532,20 +617,105 @@ async function readInteractiveEnvVariables(inputOptions: {
   return out;
 }
 
-async function readInteractiveEnvSecrets(inputOptions: {
+async function readAgentContentIgnore(inputOptions: {
+  current?: string[];
   configured: boolean;
   interactive: boolean;
-}): Promise<EnvSecretConfig[]> {
+}): Promise<string[]> {
+  if (inputOptions.current !== undefined) {
+    return inputOptions.current.map(validateIgnorePattern);
+  }
+
   if (inputOptions.configured || !inputOptions.interactive) return [];
 
   const raw = await input({
-    message: '请输入 secret env 名称，多个用逗号分隔，可留空：',
+    message: '请输入要忽略（不上传）的目录/文件模式，多个用逗号分隔，可留空，例如 .git,node_modules,*.log：',
     default: ''
   });
   const trimmed = raw.trim();
   if (!trimmed) return [];
 
-  return trimmed.split(',').map((name) => ({ name: validateEnvName(name) }));
+  return trimmed.split(',').map(validateIgnorePattern);
+}
+
+interface RawPluginItem {
+  id: string;
+  channelId?: string;
+  source?: string | null;
+  force?: boolean;
+  channel?: Record<string, unknown>;
+}
+
+async function readPluginItems(inputOptions: {
+  current?: RawPluginItem[];
+  configBaseDir: string;
+  interactive: boolean;
+}): Promise<PluginItemConfig[]> {
+  if (inputOptions.current !== undefined) {
+    return normalizePluginItems(inputOptions.current, inputOptions.configBaseDir);
+  }
+
+  if (!inputOptions.interactive) {
+    throw new Error('plugins.items 是必填字段');
+  }
+
+  const raw = await input({
+    message: '请输入插件列表，格式 id 或 id=source，多个用逗号分隔，例如 wecom=clawhub:@sunnoy/wecom：',
+    validate: (value) => (value.trim() ? true : 'plugins.items 至少需要一个插件')
+  });
+
+  const rawItems = raw.split(',').map((pair) => {
+    const trimmed = pair.trim();
+    const index = trimmed.indexOf('=');
+    if (index < 0) return { id: trimmed };
+    return { id: trimmed.slice(0, index), source: trimmed.slice(index + 1) };
+  });
+
+  return normalizePluginItems(rawItems, inputOptions.configBaseDir);
+}
+
+function normalizePluginItems(rawItems: RawPluginItem[], configBaseDir: string): PluginItemConfig[] {
+  if (rawItems.length === 0) {
+    throw new Error('plugins.items 至少需要一个插件');
+  }
+
+  const seen = new Set<string>();
+  return rawItems.map((raw) => {
+    const item = parsePluginItem(raw, configBaseDir);
+    if (seen.has(item.id)) {
+      throw new Error(`plugins.items 中插件 id 重复: ${item.id}`);
+    }
+    seen.add(item.id);
+    return item;
+  });
+}
+
+function parsePluginItem(raw: RawPluginItem, configBaseDir: string): PluginItemConfig {
+  const id = validatePluginId(raw.id);
+  const channelId = raw.channelId ? validatePluginId(raw.channelId) : undefined;
+  const force = Boolean(raw.force);
+  const channel = raw.channel;
+  const source = normalizeOptionalString(raw.source ?? undefined);
+  if (!source) {
+    return { id, channelId, sourceKind: 'none', force, channel };
+  }
+
+  const validated = validatePluginSource(source);
+  if (isPluginHostPathSource(validated)) {
+    const expanded = validated.startsWith('~/')
+      ? path.join(os.homedir(), validated.slice(2))
+      : validated;
+    return {
+      id,
+      channelId,
+      source: resolveFromBase(configBaseDir, expanded),
+      sourceKind: 'path',
+      force,
+      channel
+    };
+  }
+
+  return { id, channelId, source: validated, sourceKind: 'spec', force, channel };
 }
 
 async function readDependencyCommands(inputOptions: {

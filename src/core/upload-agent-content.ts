@@ -3,6 +3,7 @@ import path from 'node:path';
 import { select } from '@inquirer/prompts';
 import fs from 'fs-extra';
 import type { ConflictStrategy, DeployContext } from './context.js';
+import { createIgnoreMatcher } from '../utils/ignore.js';
 import { logger } from '../utils/logger.js';
 import { runCommand } from '../utils/run.js';
 import { nodeEvalScript } from '../utils/script.js';
@@ -23,6 +24,8 @@ export async function uploadAgentContent(ctx: DeployContext): Promise<'skipped' 
   const mergeScriptPath = path.join(tempDir, 'merge-agent-content.mjs');
 
   try {
+    const uploadDir = await stageAgentContent(hostDir, ctx.agentContent.ignore, tempDir);
+
     await runCommand('nemoclaw', [ctx.sandboxName, 'exec', '--', 'mkdir', '-p', remoteBase], {
       dryRun: ctx.options.dryRun,
       description: '创建 sandbox 临时目录，用于暂存 agent 初始化内容'
@@ -30,7 +33,7 @@ export async function uploadAgentContent(ctx: DeployContext): Promise<'skipped' 
 
     await runCommand(
       'nemoclaw',
-      [ctx.sandboxName, 'upload', withTrailingSlash(hostDir), `${remoteSourceDir}/`],
+      [ctx.sandboxName, 'upload', withTrailingSlash(uploadDir), `${remoteSourceDir}/`],
       {
         dryRun: ctx.options.dryRun,
         description: '上传 agent 初始化内容到 sandbox 临时目录，不直接覆盖 workspace'
@@ -81,6 +84,41 @@ export async function uploadAgentContent(ctx: DeployContext): Promise<'skipped' 
 
 export function remoteTempBase(ctx: DeployContext): string {
   return `/tmp/nemoclaw-deploy/${ctx.agentName}`;
+}
+
+export async function stageAgentContent(
+  hostDir: string,
+  ignorePatterns: string[],
+  tempDir: string
+): Promise<string> {
+  if (ignorePatterns.length === 0) return hostDir;
+
+  const matcher = createIgnoreMatcher(ignorePatterns);
+  const stagingDir = path.join(tempDir, 'staging', path.basename(hostDir));
+  let ignoredCount = 0;
+
+  await fs.copy(hostDir, stagingDir, {
+    filter: (src) => {
+      const rel = path.relative(hostDir, src);
+      if (!rel) return true;
+      const isDirectory = fs.lstatSync(src).isDirectory();
+      if (matcher.ignores(rel, isDirectory)) {
+        ignoredCount += 1;
+        return false;
+      }
+      return true;
+    }
+  });
+
+  const remaining = await fs.readdir(stagingDir).catch(() => [] as string[]);
+  if (remaining.length === 0) {
+    throw new Error(`agentContent.hostDir 下所有内容都被 ignore 规则忽略: ${hostDir}`);
+  }
+
+  logger.info(
+    `已应用 ${ignorePatterns.length} 条 ignore 规则，忽略 ${ignoredCount} 个条目，被忽略内容不会上传。`
+  );
+  return stagingDir;
 }
 
 async function detectRemoteConflicts(
