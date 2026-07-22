@@ -1,0 +1,88 @@
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "iems-local": {
+        "baseUrl": "https://ai.example.com/v1",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "Qwen3.6-35B",
+            "name": "Qwen3.6-35B",
+            "reasoning": false,
+            "input": [
+              "text"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "channels": {
+    "wecom": {
+      "enabled": true,
+      "defaultAccount": "default",
+      "accounts": {
+        "default": {
+          "enabled": true,
+          "botId": "your-bot-id",
+          "connectionMode": "websocket",
+          "websocketUrl": "wss://openws.work.weixin.qq.com"
+        }
+      }
+    }
+  },
+  "bindings": [
+    {
+      "agentId": "test",
+      "match": {
+        "channel": "advbot",
+        "accountId": "default"
+      }
+    },
+    {
+      "agentId": "smt-copilot-agent",
+      "match": {
+        "channel": "wecom",
+        "accountId": "smt"
+      }
+    }
+  ],
+  "mcp": {
+    "servers": {
+      "example-local-mcp": {
+        "command": "python3",
+        "args": [
+          "/sandbox/.openclaw/workspace-python-agent/mcp-servers/example/server.py"
+        ]
+      }
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "tools": {
+    "profile": "coding",
+    "deny": [
+      "cron"
+    ],
+    "sessions": {
+      "visibility": "all"
+    },
+    "agentToAgent": {
+      "enabled": true,
+      "allow": [
+        "python-agent"
+      ]
+    }
+  },
+  "cron": {
+    "enabled": false
+  },
+  "env": {
+    "shellEnv": {
+      "enabled": true,
+      "timeoutMs": 15000
+    }
+  }
+}

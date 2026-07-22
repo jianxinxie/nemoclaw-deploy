@@ -1,9 +1,5 @@
-import os from 'node:os';
-import path from 'node:path';
 import { input, password } from '@inquirer/prompts';
-import fs from 'fs-extra';
 import type { DeployContext } from './context.js';
-import { remoteTempBase } from './upload-agent-content.js';
 import { logger } from '../utils/logger.js';
 import { maskSecret } from '../utils/mask.js';
 import { runCommand } from '../utils/run.js';
@@ -14,95 +10,64 @@ import {
   validateGatewayUrl
 } from '../utils/validators.js';
 
-export interface ConfigureChannelResult {
+export interface PrepareChannelServerResult {
   status: 'skipped' | 'configured';
   restarted: boolean;
   reason?: 'disabled' | 'existing';
+  config?: Record<string, unknown>;
 }
 
-const pluginConfigEnsured = new WeakSet<DeployContext>();
+export async function prepareChannelServer(ctx: DeployContext): Promise<PrepareChannelServerResult> {
+  if (!ctx.channelServer.enabled) return { status: 'skipped', restarted: false, reason: 'disabled' };
 
-export async function configureChannel(ctx: DeployContext): Promise<ConfigureChannelResult> {
-  if (!ctx.channel.enabled) return { status: 'skipped', restarted: false, reason: 'disabled' };
-
-  ctx.channel.channelServerUrl = validateChannelServerUrl(ctx.channel.channelServerUrl);
-  await ensureAdvbotPluginConfig(ctx);
-  await assertAdvbotChannelSupported(ctx);
+  ctx.channelServer.url = validateChannelServerUrl(ctx.channelServer.url);
 
   const existingChannel = await getExistingAdvbotChannel(ctx);
   if (existingChannel.matches) {
-    ctx.channel.gatewayUrl = existingChannel.gatewayUrl;
-    ctx.channel.gatewayToken = ctx.channel.gatewayToken || '******';
+    ctx.channelServer.gatewayUrl = existingChannel.gatewayUrl;
+    const config = buildAdvbotConfig(ctx, ctx.channelServer.gatewayToken);
+    ctx.channelServer.gatewayToken = ctx.channelServer.gatewayToken || '******';
     logger.info(
-      `channels.advbot.accounts.${ctx.channel.accountId} 已存在且配置可用，跳过 channel 配置。`
+      `channels.advbot.accounts.${ctx.channelServer.advbotAccountId} 已存在且配置可用，跳过动态 ChannelServer 字段更新。`
     );
-    return { status: 'skipped', restarted: false, reason: 'existing' };
+    return { status: 'skipped', restarted: false, reason: 'existing', config };
   }
 
   await ensureGatewayToken(ctx);
   await ensureGatewayUrl(ctx);
 
-  const gatewayToken = requireValue(ctx.channel.gatewayToken, 'gatewayToken');
-  const gatewayUrl = validateGatewayUrl(requireValue(ctx.channel.gatewayUrl, 'gatewayUrl'));
-  ctx.channel.gatewayUrl = gatewayUrl;
+  const gatewayToken = requireValue(ctx.channelServer.gatewayToken, 'gatewayToken');
+  const gatewayUrl = validateGatewayUrl(requireValue(ctx.channelServer.gatewayUrl, 'gatewayUrl'));
+  ctx.channelServer.gatewayUrl = gatewayUrl;
 
-  const advbotConfig = {
-    enabled: true,
-    accounts: {
-      [ctx.channel.accountId]: {
-        enabled: true,
-        accountId: ctx.channel.accountId,
-        channelServerUrl: ctx.channel.channelServerUrl,
-        gatewayToken,
-        gatewayUrl
-      }
-    }
-  };
-
-  const args = [
-    ctx.sandboxName,
-    'config',
-    'set',
-    '--key',
-    'channels.advbot',
-    '--value',
-    JSON.stringify(advbotConfig)
-  ];
-
-  try {
-    await runCommand('nemoclaw', args, {
-      dryRun: ctx.options.dryRun,
-      sensitive: true,
-      description: '写入 channels.advbot 配置，包含 channel server、gateway URL 和脱敏 token'
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    logger.warn(`config set 失败，改用 patch 脚本方式。${detail}`);
-    await patchAdvbotChannel(ctx);
-  }
+  const advbotConfig = buildAdvbotConfig(ctx, gatewayToken);
 
   logger.info(`Gateway Token: ${maskSecret(gatewayToken)}`);
-  return { status: 'configured', restarted: false };
+  return { status: 'configured', restarted: false, config: advbotConfig };
 }
 
-export async function ensureAdvbotPluginConfig(ctx: DeployContext): Promise<void> {
-  if (!ctx.channel.enabled) return;
-  if (pluginConfigEnsured.has(ctx)) return;
+function buildAdvbotConfig(
+  ctx: DeployContext,
+  gatewayToken?: string
+): Record<string, unknown> {
+  const account: Record<string, unknown> = {
+    enabled: true,
+    accountId: ctx.channelServer.advbotAccountId,
+    channelServerUrl: ctx.channelServer.url,
+    gatewayUrl: requireValue(ctx.channelServer.gatewayUrl, 'gatewayUrl')
+  };
+  if (gatewayToken) account.gatewayToken = gatewayToken;
 
-  await runCommand(
-    'nemoclaw',
-    [ctx.sandboxName, 'exec', '--', 'node', '-e', nodeEvalScript(PATCH_ADVBOT_PLUGIN_CONFIG_SCRIPT)],
-    {
-      dryRun: ctx.options.dryRun,
-      timeoutMs: 30_000,
-      description: '确保 OpenClaw 已启用 advbot plugin',
-      displayCommand: `nemoclaw ${ctx.sandboxName} exec -- node -e <patch-advbot-plugin-config>`
+  return {
+    enabled: true,
+    accounts: {
+      [ctx.channelServer.advbotAccountId]: account
     }
-  );
-  pluginConfigEnsured.add(ctx);
+  };
 }
 
-async function assertAdvbotChannelSupported(ctx: DeployContext): Promise<void> {
+export async function verifyAdvbotChannelSupported(ctx: DeployContext): Promise<void> {
+  if (!ctx.channelServer.enabled) return;
   if (ctx.options.dryRun) return;
 
   try {
@@ -151,10 +116,10 @@ async function getExistingAdvbotChannel(ctx: DeployContext): Promise<ExistingAdv
       'exec',
       '--',
       'env',
-      `ACCOUNT_ID=${ctx.channel.accountId}`,
-      `CHANNEL_SERVER_URL=${ctx.channel.channelServerUrl}`,
-      `GATEWAY_TOKEN=${ctx.channel.gatewayToken ?? ''}`,
-      `GATEWAY_URL=${ctx.channel.gatewayUrl ?? ''}`,
+      `ACCOUNT_ID=${ctx.channelServer.advbotAccountId}`,
+      `CHANNEL_SERVER_URL=${ctx.channelServer.url}`,
+      `GATEWAY_TOKEN=${ctx.channelServer.gatewayToken ?? ''}`,
+      `GATEWAY_URL=${ctx.channelServer.gatewayUrl ?? ''}`,
       'node',
       '-e',
       nodeEvalScript(CHECK_ADVBOT_CHANNEL_SCRIPT)
@@ -164,7 +129,7 @@ async function getExistingAdvbotChannel(ctx: DeployContext): Promise<ExistingAdv
       sensitive: true,
       timeoutMs: 30_000,
       description: '检查 channels.advbot 是否已经存在，存在且可用则跳过重复配置',
-      displayCommand: `nemoclaw ${ctx.sandboxName} exec -- env ACCOUNT_ID=${ctx.channel.accountId} CHANNEL_SERVER_URL=${ctx.channel.channelServerUrl} node -e <check-advbot-channel>`
+      displayCommand: `nemoclaw ${ctx.sandboxName} exec -- env ACCOUNT_ID=${ctx.channelServer.advbotAccountId} CHANNEL_SERVER_URL=${ctx.channelServer.url} node -e <check-advbot-channel>`
     }
   );
 
@@ -181,7 +146,7 @@ async function getExistingAdvbotChannel(ctx: DeployContext): Promise<ExistingAdv
 }
 
 async function ensureGatewayToken(ctx: DeployContext): Promise<void> {
-  if (ctx.channel.gatewayToken) return;
+  if (ctx.channelServer.gatewayToken) return;
 
   try {
     const result = await runCommand('nemoclaw', [ctx.sandboxName, 'gateway-token', '--quiet'], {
@@ -191,7 +156,7 @@ async function ensureGatewayToken(ctx: DeployContext): Promise<void> {
     });
     const token = result.stdout.trim();
     if (!token) throw new Error('gateway-token 输出为空');
-    ctx.channel.gatewayToken = token;
+    ctx.channelServer.gatewayToken = token;
     return;
   } catch (error) {
     if (ctx.options.nonInteractive) {
@@ -200,7 +165,7 @@ async function ensureGatewayToken(ctx: DeployContext): Promise<void> {
     }
   }
 
-  ctx.channel.gatewayToken = await password({
+  ctx.channelServer.gatewayToken = await password({
     message: '请输入 gatewayToken：',
     mask: '*',
     validate: (value) => (value.trim() ? true : 'gatewayToken 是必填字段')
@@ -208,8 +173,8 @@ async function ensureGatewayToken(ctx: DeployContext): Promise<void> {
 }
 
 async function ensureGatewayUrl(ctx: DeployContext): Promise<void> {
-  if (ctx.channel.gatewayUrl) {
-    ctx.channel.gatewayUrl = validateGatewayUrl(ctx.channel.gatewayUrl);
+  if (ctx.channelServer.gatewayUrl) {
+    ctx.channelServer.gatewayUrl = validateGatewayUrl(ctx.channelServer.gatewayUrl);
     return;
   }
 
@@ -221,7 +186,7 @@ async function ensureGatewayUrl(ctx: DeployContext): Promise<void> {
     });
     const dashboardUrl = result.stdout.trim();
     if (!dashboardUrl) throw new Error('dashboard-url 输出为空');
-    ctx.channel.gatewayUrl = dashboardUrlToGatewayUrl(dashboardUrl);
+    ctx.channelServer.gatewayUrl = dashboardUrlToGatewayUrl(dashboardUrl);
     return;
   } catch (error) {
     if (ctx.options.nonInteractive) {
@@ -230,7 +195,7 @@ async function ensureGatewayUrl(ctx: DeployContext): Promise<void> {
     }
   }
 
-  ctx.channel.gatewayUrl = await input({
+  ctx.channelServer.gatewayUrl = await input({
     message: '请输入 gatewayUrl：',
     validate: (value) => {
       try {
@@ -243,52 +208,6 @@ async function ensureGatewayUrl(ctx: DeployContext): Promise<void> {
   });
 }
 
-async function patchAdvbotChannel(ctx: DeployContext): Promise<void> {
-  const gatewayToken = requireValue(ctx.channel.gatewayToken, 'gatewayToken');
-  const gatewayUrl = requireValue(ctx.channel.gatewayUrl, 'gatewayUrl');
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nemoclaw-deploy-'));
-  const scriptPath = path.join(tempDir, 'patch-advbot-channel.mjs');
-  const remoteBase = remoteTempBase(ctx);
-
-  try {
-    await fs.writeFile(scriptPath, PATCH_ADVBOT_CHANNEL_SCRIPT, 'utf8');
-    await runCommand('nemoclaw', [ctx.sandboxName, 'exec', '--', 'mkdir', '-p', remoteBase], {
-      dryRun: ctx.options.dryRun,
-      description: '创建 sandbox 临时目录，用于上传 advbot 配置 patch 脚本'
-    });
-    await runCommand(
-      'nemoclaw',
-      [ctx.sandboxName, 'upload', scriptPath, `${remoteBase}/patch-advbot-channel.mjs`],
-      {
-        dryRun: ctx.options.dryRun,
-        description: '上传 advbot 配置 patch 脚本到 sandbox'
-      }
-    );
-    await runCommand(
-      'nemoclaw',
-      [
-        ctx.sandboxName,
-        'exec',
-        '--',
-        'env',
-        `ACCOUNT_ID=${ctx.channel.accountId}`,
-        `CHANNEL_SERVER_URL=${ctx.channel.channelServerUrl}`,
-        `GATEWAY_TOKEN=${gatewayToken}`,
-        `GATEWAY_URL=${gatewayUrl}`,
-        'node',
-        `${remoteBase}/patch-advbot-channel.mjs`
-      ],
-      {
-        dryRun: ctx.options.dryRun,
-        sensitive: true,
-        description: '执行 patch 脚本，安全更新 /sandbox/.openclaw/openclaw.json'
-      }
-    );
-  } finally {
-    await fs.remove(tempDir);
-  }
-}
-
 function requireValue(value: string | undefined, label: string): string {
   if (!value) throw new Error(`${label} 是必填字段`);
   return value;
@@ -299,7 +218,7 @@ function buildUnsupportedAdvbotMessage(sandboxName: string): string {
     '当前 OpenClaw 不支持 advbot channel，已停止配置 channels.advbot。',
     '请先确认 advbot channel/plugin 已安装并能在下面命令中看到：',
     `nemoclaw ${sandboxName} exec -- openclaw channels list --all`,
-    '如果这个 OpenClaw 版本没有 advbot channel，请在 deploy.yaml 中设置 channel.enabled: false。'
+    '如果这个 OpenClaw 版本没有 advbot channel，请在 onboard.yaml 中设置 deploy.shared.channelServer.enabled: false。'
   ].join('\n');
 }
 
@@ -311,82 +230,11 @@ function buildInvalidAdvbotConfigMessage(sandboxName: string, detail: string): s
     '可先按 OpenClaw 提示修复：',
     `nemoclaw ${sandboxName} exec -- openclaw doctor --fix --non-interactive`,
     '',
-    '如果 advbot channel 在当前 OpenClaw 中不可用，请移除 channels.advbot 后重试，或在 deploy.yaml 中设置 channel.enabled: false。',
+    '如果 advbot channel 在当前 OpenClaw 中不可用，请移除 channels.advbot 后重试，或在 onboard.yaml 中设置 deploy.shared.channelServer.enabled: false。',
     '',
     detail
   ].join('\n');
 }
-
-const PATCH_ADVBOT_CHANNEL_SCRIPT = `
-import fs from 'node:fs';
-
-const configPath = '/sandbox/.openclaw/openclaw.json';
-
-const accountId = process.env.ACCOUNT_ID || 'default';
-const channelServerUrl = process.env.CHANNEL_SERVER_URL;
-const gatewayToken = process.env.GATEWAY_TOKEN;
-const gatewayUrl = process.env.GATEWAY_URL;
-
-if (!channelServerUrl) throw new Error('CHANNEL_SERVER_URL is required');
-if (!gatewayToken) throw new Error('GATEWAY_TOKEN is required');
-if (!gatewayUrl) throw new Error('GATEWAY_URL is required');
-
-const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-
-config.plugins ??= {};
-config.plugins.entries ??= {};
-config.plugins.entries.advbot = {
-  ...config.plugins.entries.advbot,
-  enabled: true,
-  config:
-    config.plugins.entries.advbot &&
-    config.plugins.entries.advbot.config &&
-    typeof config.plugins.entries.advbot.config === 'object' &&
-    !Array.isArray(config.plugins.entries.advbot.config)
-      ? config.plugins.entries.advbot.config
-      : {}
-};
-
-config.channels ??= {};
-config.channels.advbot ??= {};
-config.channels.advbot.enabled = true;
-config.channels.advbot.accounts ??= {};
-
-config.channels.advbot.accounts[accountId] = {
-  enabled: true,
-  accountId,
-  channelServerUrl,
-  gatewayToken,
-  gatewayUrl
-};
-
-fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-`;
-
-const PATCH_ADVBOT_PLUGIN_CONFIG_SCRIPT = `
-const fs = require('node:fs');
-
-const configPath = '/sandbox/.openclaw/openclaw.json';
-const config = fs.existsSync(configPath)
-  ? JSON.parse(fs.readFileSync(configPath, 'utf8'))
-  : {};
-
-config.plugins ??= {};
-config.plugins.entries ??= {};
-config.plugins.entries.advbot = {
-  ...config.plugins.entries.advbot,
-  enabled: true,
-  config:
-    config.plugins.entries.advbot &&
-    config.plugins.entries.advbot.config &&
-    typeof config.plugins.entries.advbot.config === 'object' &&
-    !Array.isArray(config.plugins.entries.advbot.config)
-      ? config.plugins.entries.advbot.config
-      : {}
-};
-
-fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-`;
 
 const CHECK_ADVBOT_CHANNEL_SCRIPT = `
 const fs = require('node:fs');

@@ -1,25 +1,27 @@
 import os from 'node:os';
 import path from 'node:path';
 import { confirm, input, select } from '@inquirer/prompts';
+import fs from 'fs-extra';
 import { z } from 'zod';
 import { resolveFromBase } from '../utils/fs.js';
 import { readYamlFile } from '../utils/yaml.js';
 import {
   conflictStrategySchema,
   isPluginHostPathSource,
+  validateAgentModel,
   validateAgentName,
   validateChannelServerUrl,
   validateDependencyCommand,
   validateDependencyWorkingDir,
+  validateEnvDirectory,
   validateEnvName,
   validateEnvTargetFile,
   validateEnvValue,
-  validateGatewayUrl,
   validateIgnorePattern,
   validatePluginId,
   validatePluginSource,
-  validateSandboxName,
-  validateToolsProfile
+  validateSandboxCopyDestination,
+  validateSandboxName
 } from '../utils/validators.js';
 
 export type ConflictStrategy = 'ask' | 'skip' | 'backup' | 'overwrite' | 'fail';
@@ -30,13 +32,19 @@ export interface PluginItemConfig {
   source?: string;
   sourceKind: 'path' | 'spec' | 'none';
   force: boolean;
-  channel?: Record<string, unknown>;
+}
+
+export interface SandboxUploadConfig {
+  source: string;
+  destination: string;
+  overwrite: boolean;
 }
 
 export interface DeployContext {
   sandboxName: string;
   agentName: string;
   workspace: string;
+  model?: string;
 
   agentContent: {
     enabled: boolean;
@@ -50,22 +58,38 @@ export interface DeployContext {
     hostDir?: string;
   };
 
+  sandbox: {
+    uploads: {
+      enabled: boolean;
+      items: SandboxUploadConfig[];
+    };
+    commands: {
+      enabled: boolean;
+      workingDir: string;
+      items: string[];
+      continueOnError: boolean;
+    };
+  };
+
+  channelRegistration: {
+    enabled: boolean;
+    continueOnError: boolean;
+  };
+
   plugins: {
     enabled: boolean;
     items: PluginItemConfig[];
   };
 
-  tools: {
+  openclawConfig: {
     enabled: boolean;
-    profile: string;
-    config: Record<string, unknown>;
+    file?: string;
   };
 
-  channel: {
+  channelServer: {
     enabled: boolean;
-    type: 'advbot';
-    accountId: string;
-    channelServerUrl: string;
+    advbotAccountId: string;
+    url: string;
     gatewayToken?: string;
     gatewayUrl?: string;
   };
@@ -77,15 +101,9 @@ export interface DeployContext {
 
   env: {
     enabled: boolean;
+    directory: string;
     targetFile: string;
     variables: Record<string, string>;
-  };
-
-  dependencies: {
-    enabled: boolean;
-    workingDir: string;
-    commands: string[];
-    continueOnError: boolean;
   };
 
   options: {
@@ -101,95 +119,194 @@ export interface DeployCliOptions {
   dryRun?: boolean;
 }
 
-const deployConfigSchema = z
-  .object({
-    sandboxName: z.string().optional(),
-    agentName: z.string().optional(),
-    workspace: z.string().optional().nullable(),
-    agentContent: z
-      .object({
-        enabled: z.boolean().optional(),
-        hostDir: z.string().optional(),
-        conflictStrategy: conflictStrategySchema.optional(),
-        ignore: z.array(z.string()).optional()
-      })
-      .optional(),
-    skill: z
-      .object({
-        enabled: z.boolean().optional(),
-        hostDir: z.string().optional()
-      })
-      .optional(),
-    plugins: z
-      .object({
-        enabled: z.boolean().optional(),
-        items: z
-          .array(
-            z.object({
-              id: z.string(),
-              channelId: z.string().optional(),
-              source: z.string().optional().nullable(),
-              force: z.boolean().optional(),
-              channel: z.record(z.string(), z.unknown()).optional()
-            })
-          )
-          .optional()
-      })
-      .optional(),
-    tools: z
-      .object({
-        enabled: z.boolean().optional(),
-        profile: z.string().optional(),
-        config: z.record(z.string(), z.unknown()).optional()
-      })
-      .optional(),
-    channel: z
-      .object({
-        enabled: z.boolean().optional(),
-        type: z.literal('advbot').optional(),
-        accountId: z.string().optional(),
-        channelServerUrl: z.string().optional(),
-        gatewayToken: z.string().optional().nullable(),
-        gatewayUrl: z.string().optional().nullable()
-      })
-      .optional(),
-    networkPolicy: z
-      .object({
-        enabled: z.boolean().optional(),
-        dir: z.string().optional(),
-        file: z.string().optional()
-      })
-      .optional(),
-    env: z
-      .object({
-        enabled: z.boolean().optional(),
-        targetFile: z.string().optional(),
-        variables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
-      })
-      .optional(),
-    dependencies: z
-      .object({
-        enabled: z.boolean().optional(),
-        workingDir: z.string().optional(),
-        commands: z.array(z.string()).optional(),
-        continueOnError: z.boolean().optional()
-      })
-      .optional(),
-    options: z
-      .object({
-        restartGateway: z.boolean().optional()
-      })
-      .optional()
-  })
-  .passthrough();
+export interface DeployPlan {
+  schemaVersion: 3;
+  sandboxName: string;
+  agents: DeployContext[];
+}
 
-type DeployConfigInput = z.infer<typeof deployConfigSchema>;
+const agentContentSchema = z.object({
+  enabled: z.boolean().optional(),
+  hostDir: z.string().optional(),
+  conflictStrategy: conflictStrategySchema.optional(),
+  ignore: z.array(z.string()).optional()
+}).strict().optional();
+
+const skillSchema = z.object({
+  enabled: z.boolean().optional(),
+  hostDir: z.string().optional()
+}).strict().optional();
+
+const sandboxUploadsSchema = z.object({
+  enabled: z.boolean().optional(),
+  items: z.array(z.object({
+    source: z.string(),
+    destination: z.string(),
+    overwrite: z.boolean().optional()
+  }).strict()).optional()
+}).strict().optional();
+
+const sandboxCommandsSchema = z.object({
+  enabled: z.boolean().optional(),
+  workingDir: z.string().optional(),
+  items: z.array(z.string()).optional(),
+  continueOnError: z.boolean().optional()
+}).strict().optional();
+
+const channelRegistrationSchema = z.object({
+  enabled: z.boolean().optional(),
+  continueOnError: z.boolean().optional()
+}).strict().optional();
+
+const envSchema = z.object({
+  enabled: z.boolean().optional(),
+  directory: z.string().optional(),
+  targetFile: z.string().optional(),
+  variables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
+}).strict().optional();
+
+const pluginsSchema = z.object({
+  enabled: z.boolean().optional(),
+  items: z.array(z.object({
+    id: z.string(),
+    channelId: z.string().optional(),
+    source: z.string().optional().nullable(),
+    force: z.boolean().optional()
+  }).strict()).optional()
+}).strict().optional();
+
+const openclawConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  file: z.string().optional()
+}).strict().optional();
+
+const channelServerSchema = z.object({
+  enabled: z.boolean().optional(),
+  advbotAccountId: z.string().optional(),
+  url: z.string().optional()
+}).strict().optional();
+
+const networkPolicySchema = z.object({
+  enabled: z.boolean().optional(),
+  dir: z.string().optional()
+}).strict().optional();
+
+const deployOptionsSchema = z.object({
+  restartGateway: z.boolean().optional()
+}).strict().optional();
+
+const sharedDeploySchema = z.object({
+  plugins: pluginsSchema,
+  openclawConfig: openclawConfigSchema,
+  channelServer: channelServerSchema,
+  networkPolicy: networkPolicySchema,
+  options: deployOptionsSchema
+}).strict().optional();
+
+const agentDeploySchema = z.object({
+  name: z.string(),
+  workspace: z.string().optional().nullable(),
+  model: z.string().optional().nullable(),
+  agentContent: agentContentSchema,
+  skill: skillSchema,
+  sandbox: z.object({
+    uploads: sandboxUploadsSchema,
+    commands: sandboxCommandsSchema
+  }).strict().optional(),
+  channelRegistration: channelRegistrationSchema,
+  env: envSchema
+}).strict();
+
+const unifiedDeployConfigSchema = z.object({
+  schemaVersion: z.literal(3),
+  install: z.unknown().optional(),
+  onboard: z.object({
+    sandbox: z.object({ name: z.string() }).passthrough()
+  }).passthrough(),
+  deploy: z.object({
+    shared: sharedDeploySchema,
+    agents: z.array(agentDeploySchema).min(1)
+  }).strict()
+}).strict();
+
+const normalizedAgentConfigSchema = z.object({
+  sandboxName: z.string().optional(),
+  agentName: z.string().optional(),
+  workspace: z.string().optional().nullable(),
+  model: z.string().optional().nullable(),
+  agentContent: agentContentSchema,
+  skill: skillSchema,
+  sandbox: z.object({
+    uploads: sandboxUploadsSchema,
+    commands: sandboxCommandsSchema
+  }).strict().optional(),
+  channelRegistration: channelRegistrationSchema,
+  plugins: pluginsSchema,
+  openclawConfig: openclawConfigSchema,
+  channelServer: channelServerSchema,
+  networkPolicy: networkPolicySchema,
+  env: envSchema,
+  options: deployOptionsSchema
+});
+
+type DeployConfigInput = z.infer<typeof normalizedAgentConfigSchema>;
+
+interface NormalizedDeployConfig {
+  schemaVersion: 3;
+  configs: DeployConfigInput[];
+}
 
 export async function collectDeployContext(options: DeployCliOptions): Promise<DeployContext> {
-  const configPath = options.config ? path.resolve(options.config) : undefined;
-  const configBaseDir = configPath ? path.dirname(configPath) : process.cwd();
-  const config = configPath ? await loadDeployConfig(configPath) : {};
-  const hasConfig = Boolean(configPath);
+  const plan = await collectDeployPlan(options);
+  if (plan.agents.length !== 1) {
+    throw new Error('当前配置包含多个 agent，请使用 collectDeployPlan 处理');
+  }
+  return plan.agents[0];
+}
+
+export async function collectDeployPlan(options: DeployCliOptions): Promise<DeployPlan> {
+  const configPath = path.resolve(options.config ?? 'onboard.yaml');
+  if (!(await fs.pathExists(configPath))) {
+    throw new Error(`统一配置文件不存在: ${configPath}`);
+  }
+  const configBaseDir = path.dirname(configPath);
+  const normalized = await loadDeployConfigs(configPath);
+
+  const agents: DeployContext[] = [];
+  for (const config of normalized.configs) {
+    agents.push(await collectOneDeployContext(options, config, configBaseDir));
+  }
+
+  const sandboxNames = new Set(agents.map((agent) => agent.sandboxName));
+  if (sandboxNames.size !== 1) {
+    throw new Error('deploy.agents 中所有 agent 必须属于同一个 sandbox');
+  }
+
+  const agentNames = new Set<string>();
+  const workspaces = new Set<string>();
+  for (const agent of agents) {
+    if (agentNames.has(agent.agentName)) {
+      throw new Error(`deploy.agents 中 agent 名称重复: ${agent.agentName}`);
+    }
+    if (workspaces.has(agent.workspace)) {
+      throw new Error(`deploy.agents 中 workspace 重复: ${agent.workspace}`);
+    }
+    agentNames.add(agent.agentName);
+    workspaces.add(agent.workspace);
+  }
+
+  return {
+    schemaVersion: normalized.schemaVersion,
+    sandboxName: agents[0].sandboxName,
+    agents
+  };
+}
+
+async function collectOneDeployContext(
+  options: DeployCliOptions,
+  config: DeployConfigInput,
+  configBaseDir: string
+): Promise<DeployContext> {
   const interactive = !options.nonInteractive;
 
   const sandboxName = validateSandboxName(
@@ -216,12 +333,10 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
   const configuredWorkspace = normalizeOptionalString(config.workspace);
   const workspace =
     configuredWorkspace ??
-    (hasConfig || !interactive
-      ? defaultWorkspace
-      : await input({
-          message: `请输入 workspace，默认 ${defaultWorkspace}：`,
-          default: defaultWorkspace
-        }));
+    defaultWorkspace;
+
+  const configuredModel = normalizeOptionalString(config.model ?? undefined);
+  const model = configuredModel ? validateAgentModel(configuredModel) : undefined;
 
   const agentContentEnabled = await readOptionalBoolean({
     current: config.agentContent?.enabled,
@@ -273,6 +388,21 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
       })
     : undefined;
 
+  const fileCopiesEnabled = await readOptionalBoolean({
+    current: config.sandbox?.uploads?.enabled,
+    interactive,
+    promptMessage: '是否上传主机文件或目录到 sandbox？',
+    defaultValue: false
+  });
+
+  const fileCopyItems = fileCopiesEnabled
+    ? await readFileCopyItems({
+        current: config.sandbox?.uploads?.items,
+        configBaseDir,
+        interactive
+      })
+    : [];
+
   const pluginsEnabled = await readOptionalBoolean({
     current: config.plugins?.enabled,
     interactive,
@@ -288,45 +418,55 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
       })
     : [];
 
-  const toolsEnabled = await readOptionalBoolean({
-    current: config.tools?.enabled,
+  const openclawConfigEnabled = await readOptionalBoolean({
+    current: config.openclawConfig?.enabled,
     interactive,
-    promptMessage: '是否配置 OpenClaw tools（默认设置 tools.profile=coding）？',
+    promptMessage: '是否合并 openclaw partial 配置？',
+    defaultValue: false
+  });
+
+  const openclawConfigFile = openclawConfigEnabled
+    ? await readOptionalPath({
+        current: config.openclawConfig?.file,
+        configBaseDir,
+        interactive,
+        label: 'openclawConfig.file',
+        promptMessage: '请输入 openclaw partial JSON 文件路径：'
+      })
+    : undefined;
+
+  const channelServerEnabled = await readOptionalBoolean({
+    current: config.channelServer?.enabled,
+    interactive,
+    promptMessage: '是否启用 ChannelServer 集成？',
     defaultValue: true
   });
 
-  const toolsProfile = toolsEnabled
-    ? validateToolsProfile(
-        await readStringWithDefault({
-          current: config.tools?.profile,
-          interactive,
-          promptMessage: '请输入 tools.profile，默认 coding：',
-          defaultValue: 'coding'
-        })
-      )
-    : 'coding';
-
-  const channelEnabled = await readOptionalBoolean({
-    current: config.channel?.enabled,
-    interactive,
-    promptMessage: '是否配置 advbot channel？',
-    defaultValue: true
-  });
-
-  const channelServerUrl = channelEnabled
+  const channelServerUrl = channelServerEnabled
     ? validateChannelServerUrl(
         await readRequiredString({
-          current: config.channel?.channelServerUrl,
-          label: 'channel.channelServerUrl',
-          promptMessage: '请输入 channelServerUrl：',
+          current: config.channelServer?.url,
+          label: 'channelServer.url',
+          promptMessage: '请输入 ChannelServer URL：',
           interactive,
           validate: validateChannelServerUrl
         })
       )
     : '';
 
-  const gatewayToken = normalizeOptionalString(config.channel?.gatewayToken ?? undefined);
-  const gatewayUrl = normalizeOptionalString(config.channel?.gatewayUrl ?? undefined);
+  const channelRegistrationEnabled = await readOptionalBoolean({
+    current: config.channelRegistration?.enabled,
+    interactive,
+    promptMessage: `是否向 channel server 注册 agent ${agentName}？`,
+    defaultValue: false
+  });
+  if (channelRegistrationEnabled && !channelServerEnabled) {
+    throw new Error(
+      `agent ${agentName} 设置了 channelRegistration.enabled=true，但 deploy.shared.channelServer.enabled=false`
+    );
+  }
+  const channelRegistrationContinueOnError =
+    config.channelRegistration?.continueOnError ?? true;
 
   const networkPolicyEnabled = await readOptionalBoolean({
     current: config.networkPolicy?.enabled,
@@ -337,7 +477,7 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
 
   const networkPolicyDir = networkPolicyEnabled
     ? await readOptionalPath({
-        current: config.networkPolicy?.dir ?? config.networkPolicy?.file,
+        current: config.networkPolicy?.dir,
         configBaseDir,
         interactive,
         label: 'networkPolicy.dir',
@@ -348,9 +488,14 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
   const envEnabled = await readOptionalBoolean({
     current: config.env?.enabled,
     interactive,
-    promptMessage: '是否配置 workspace env 文件？',
+    promptMessage: '是否配置 agent env 文件？',
     defaultValue: false
   });
+
+  const envDirectory = validateEnvDirectory(
+    envEnabled ? config.env?.directory : undefined,
+    workspace.trim() || defaultWorkspace
+  );
 
   const envTargetFile = envEnabled
     ? validateEnvTargetFile(
@@ -374,21 +519,21 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
     : {};
 
   const dependenciesEnabled = await readOptionalBoolean({
-    current: config.dependencies?.enabled,
+    current: config.sandbox?.commands?.enabled,
     interactive,
-    promptMessage: '是否安装 workspace 依赖？',
+    promptMessage: '是否在 sandbox 中执行 agent 命令？',
     defaultValue: false
   });
 
   const dependencyCommands = dependenciesEnabled
     ? await readDependencyCommands({
-        current: config.dependencies?.commands,
+        current: config.sandbox?.commands?.items,
         interactive
       })
     : [];
 
   const dependencyWorkingDir = validateDependencyWorkingDir(
-    dependenciesEnabled ? config.dependencies?.workingDir : undefined,
+    dependenciesEnabled ? config.sandbox?.commands?.workingDir : undefined,
     workspace.trim() || defaultWorkspace
   );
 
@@ -396,6 +541,7 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
     sandboxName,
     agentName,
     workspace: workspace.trim() || defaultWorkspace,
+    model,
     agentContent: {
       enabled: agentContentEnabled,
       hostDir: agentContentHostDir,
@@ -406,22 +552,34 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
       enabled: skillEnabled,
       hostDir: skillHostDir
     },
+    sandbox: {
+      uploads: {
+        enabled: fileCopiesEnabled,
+        items: fileCopyItems
+      },
+      commands: {
+        enabled: dependenciesEnabled,
+        workingDir: dependencyWorkingDir,
+        items: dependencyCommands,
+        continueOnError: config.sandbox?.commands?.continueOnError ?? false
+      }
+    },
+    channelRegistration: {
+      enabled: channelRegistrationEnabled,
+      continueOnError: channelRegistrationContinueOnError
+    },
     plugins: {
       enabled: pluginsEnabled,
       items: pluginItems
     },
-    tools: {
-      enabled: toolsEnabled,
-      profile: toolsProfile,
-      config: config.tools?.config ?? {}
+    openclawConfig: {
+      enabled: openclawConfigEnabled,
+      file: openclawConfigFile
     },
-    channel: {
-      enabled: channelEnabled,
-      type: config.channel?.type ?? 'advbot',
-      accountId: config.channel?.accountId?.trim() || 'default',
-      channelServerUrl,
-      gatewayToken,
-      gatewayUrl: gatewayUrl ? validateGatewayUrl(gatewayUrl) : undefined
+    channelServer: {
+      enabled: channelServerEnabled,
+      advbotAccountId: config.channelServer?.advbotAccountId?.trim() || 'default',
+      url: channelServerUrl
     },
     networkPolicy: {
       enabled: networkPolicyEnabled,
@@ -429,14 +587,9 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
     },
     env: {
       enabled: envEnabled,
+      directory: envDirectory,
       targetFile: envTargetFile,
       variables: envVariables
-    },
-    dependencies: {
-      enabled: dependenciesEnabled,
-      workingDir: dependencyWorkingDir,
-      commands: dependencyCommands,
-      continueOnError: config.dependencies?.continueOnError ?? false
     },
     options: {
       restartGateway: config.options?.restartGateway ?? false,
@@ -446,30 +599,33 @@ export async function collectDeployContext(options: DeployCliOptions): Promise<D
   };
 }
 
-async function loadDeployConfig(configPath: string): Promise<DeployConfigInput> {
+async function loadDeployConfigs(configPath: string): Promise<NormalizedDeployConfig> {
   const raw = await readYamlFile(configPath);
-  assertRemovedConfigFields(raw);
-  const result = deployConfigSchema.safeParse(raw ?? {});
+  const result = unifiedDeployConfigSchema.safeParse(raw ?? {});
   if (!result.success) {
-    throw new Error(`deploy config 格式无效: ${result.error.message}`);
-  }
-  return result.data;
-}
-
-function assertRemovedConfigFields(raw: unknown): void {
-  if (!isPlainRecord(raw)) return;
-
-  if (isPlainRecord(raw.env) && Object.prototype.hasOwnProperty.call(raw.env, 'secrets')) {
-    throw new Error('deploy config 字段 env.secrets 已移除，请删除该字段；secret 请通过运行环境或平台能力注入。');
+    throw new Error(`统一 onboard.yaml 的 deploy 配置格式无效: ${result.error.message}`);
   }
 
-  if (isPlainRecord(raw.options) && Object.prototype.hasOwnProperty.call(raw.options, 'restart')) {
-    throw new Error('deploy config 字段 options.restart 已移除，请改用 options.restartGateway。');
-  }
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  const shared = result.data.deploy.shared ?? {};
+  return {
+    schemaVersion: 3,
+    configs: result.data.deploy.agents.map((agent) => ({
+      sandboxName: result.data.onboard.sandbox.name,
+      agentName: agent.name,
+      workspace: agent.workspace,
+      model: agent.model,
+      agentContent: agent.agentContent,
+      skill: agent.skill,
+      sandbox: agent.sandbox,
+      channelRegistration: agent.channelRegistration,
+      plugins: shared.plugins,
+      openclawConfig: shared.openclawConfig,
+      channelServer: shared.channelServer,
+      networkPolicy: shared.networkPolicy,
+      env: agent.env,
+      options: shared.options
+    }))
+  };
 }
 
 async function readRequiredString(inputOptions: {
@@ -638,12 +794,78 @@ async function readAgentContentIgnore(inputOptions: {
   return trimmed.split(',').map(validateIgnorePattern);
 }
 
+async function readFileCopyItems(inputOptions: {
+  current?: Array<{ source: string; destination: string; overwrite?: boolean }>;
+  configBaseDir: string;
+  interactive: boolean;
+}): Promise<SandboxUploadConfig[]> {
+  if (inputOptions.current !== undefined) {
+    if (inputOptions.current.length === 0) {
+      throw new Error('sandbox.uploads.enabled=true 时，sandbox.uploads.items 至少需要一项');
+    }
+    return inputOptions.current.map((item) => normalizeFileCopyItem(item, inputOptions.configBaseDir));
+  }
+
+  if (!inputOptions.interactive) {
+    throw new Error('sandbox.uploads.enabled=true 时，sandbox.uploads.items 是必填字段');
+  }
+
+  const items: SandboxUploadConfig[] = [];
+  let addAnother = true;
+  while (addAnother) {
+    const source = await input({
+      message: '请输入要复制的主机文件或目录路径：',
+      validate: (value) => (value.trim() ? true : '主机文件或目录路径不能为空')
+    });
+    const destination = await input({
+      message: '请输入 sandbox 中的目标绝对路径：',
+      validate: (value) => {
+        try {
+          validateSandboxCopyDestination(value);
+          return true;
+        } catch (error) {
+          return error instanceof Error ? error.message : '目标路径无效';
+        }
+      }
+    });
+    const overwrite = await confirm({
+      message: '目标文件已存在时是否覆盖？',
+      default: true
+    });
+    items.push(
+      normalizeFileCopyItem({ source, destination, overwrite }, inputOptions.configBaseDir)
+    );
+    addAnother = await confirm({ message: '是否继续添加 sandbox 上传项？', default: false });
+  }
+
+  return items;
+}
+
+function normalizeFileCopyItem(
+  raw: { source: string; destination: string; overwrite?: boolean },
+  configBaseDir: string
+): SandboxUploadConfig {
+  const source = raw.source.trim();
+  if (!source) {
+    throw new Error('sandbox.uploads.items[].source 是必填字段');
+  }
+  if (source.includes('\0') || /[\r\n]/.test(source)) {
+    throw new Error('sandbox.uploads.items[].source 不能包含空字符或换行');
+  }
+
+  const expanded = source.startsWith('~/') ? path.join(os.homedir(), source.slice(2)) : source;
+  return {
+    source: resolveFromBase(configBaseDir, expanded),
+    destination: validateSandboxCopyDestination(raw.destination),
+    overwrite: raw.overwrite ?? true
+  };
+}
+
 interface RawPluginItem {
   id: string;
   channelId?: string;
   source?: string | null;
   force?: boolean;
-  channel?: Record<string, unknown>;
 }
 
 async function readPluginItems(inputOptions: {
@@ -694,10 +916,9 @@ function parsePluginItem(raw: RawPluginItem, configBaseDir: string): PluginItemC
   const id = validatePluginId(raw.id);
   const channelId = raw.channelId ? validatePluginId(raw.channelId) : undefined;
   const force = Boolean(raw.force);
-  const channel = raw.channel;
   const source = normalizeOptionalString(raw.source ?? undefined);
   if (!source) {
-    return { id, channelId, sourceKind: 'none', force, channel };
+    return { id, channelId, sourceKind: 'none', force };
   }
 
   const validated = validatePluginSource(source);
@@ -710,12 +931,11 @@ function parsePluginItem(raw: RawPluginItem, configBaseDir: string): PluginItemC
       channelId,
       source: resolveFromBase(configBaseDir, expanded),
       sourceKind: 'path',
-      force,
-      channel
+      force
     };
   }
 
-  return { id, channelId, source: validated, sourceKind: 'spec', force, channel };
+  return { id, channelId, source: validated, sourceKind: 'spec', force };
 }
 
 async function readDependencyCommands(inputOptions: {
@@ -725,18 +945,18 @@ async function readDependencyCommands(inputOptions: {
   if (inputOptions.current !== undefined) {
     const commands = inputOptions.current.map(validateDependencyCommand);
     if (commands.length === 0) {
-      throw new Error('dependencies.commands 至少需要一个命令');
+      throw new Error('sandbox.commands.items 至少需要一个命令');
     }
     return commands;
   }
 
   if (!inputOptions.interactive) {
-    throw new Error('dependencies.commands 是必填字段');
+    throw new Error('sandbox.commands.items 是必填字段');
   }
 
   const raw = await input({
-    message: '请输入依赖安装命令，例如 npm install：',
-    validate: (value) => (value.trim() ? true : 'dependencies.commands 是必填字段')
+    message: '请输入要在 sandbox 中执行的命令，例如 npm install：',
+    validate: (value) => (value.trim() ? true : 'sandbox.commands.items 是必填字段')
   });
 
   return [validateDependencyCommand(raw)];

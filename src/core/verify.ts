@@ -21,10 +21,10 @@ export async function verifyDeployment(ctx: DeployContext, options: VerifyOption
     description: '验证 sandbox 状态仍然可读取'
   });
 
-  if (ctx.channel.enabled) {
-    if (!ctx.channel.gatewayToken) throw new Error('验证失败：gatewayToken 未获取');
-    if (!ctx.channel.gatewayUrl) throw new Error('验证失败：gatewayUrl 未获取');
-    if (!ctx.channel.channelServerUrl) throw new Error('验证失败：channelServerUrl 未填写');
+  if (ctx.channelServer.enabled) {
+    if (!ctx.channelServer.gatewayToken) throw new Error('验证失败：gatewayToken 未获取');
+    if (!ctx.channelServer.gatewayUrl) throw new Error('验证失败：gatewayUrl 未获取');
+    if (!ctx.channelServer.url) throw new Error('验证失败：ChannelServer URL 未填写');
   }
 
   if (ctx.networkPolicy.enabled && !options.policyApplied) {

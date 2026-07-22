@@ -4,16 +4,18 @@
 
 实现一个 Node.js / TypeScript CLI 工具：`nemoclaw-deploy`。
 
-该工具用于在已经部署好的 NemoClaw sandbox 中，安全完成 OpenClaw agent 部署，包括：
+该工具用于完成 NemoClaw 安装/onboard，并在 sandbox 中安全完成一个或多个 OpenClaw agent 部署，包括：
 
-1. 创建 OpenClaw agent。
-2. 上传 agent 初始化内容。
-3. 安装 skill。
-4. 配置 `channels.advbot`。
-5. 应用 network policy。
-6. 做基础验证。
+1. 缺少 NemoClaw 时通过 NVIDIA 官方安装器安装。
+2. 使用独立 `onboard.yaml` 创建、恢复或重建 sandbox。
+3. 使用 `deploy.yaml` 创建一个或多个 OpenClaw agent。
+4. 上传 agent 初始化内容。
+5. 安装 skill。
+6. 配置 `channels.advbot`。
+7. 应用 network policy。
+8. 做基础验证。
 
-本工具不负责安装 NemoClaw，也不负责创建 sandbox。
+`onboard.yaml` 管理主机和 sandbox 生命周期；`deploy.yaml` 管理 sandbox 共享配置与 agent 列表。两者必须引用同一个 sandbox 名称。
 
 ---
 
@@ -35,6 +37,12 @@ nemoclaw-deploy
 
 ```bash
 nemoclaw-deploy deploy --config deploy.yaml
+```
+
+完整安装、onboard 和多 agent 部署：
+
+```bash
+nemoclaw-deploy up --onboard-config onboard.yaml --deploy-config deploy.yaml
 ```
 
 非交互部署：

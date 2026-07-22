@@ -13,7 +13,7 @@ export async function createAgent(ctx: DeployContext): Promise<void> {
     }
   );
 
-  if (agentListContains(initialListResult.stdout, ctx.agentName)) {
+  if (syncExistingAgentContext(ctx, initialListResult.stdout)) {
     logger.info(`agent 已存在，跳过创建: ${ctx.agentName}`);
     return;
   }
@@ -37,6 +37,16 @@ export async function createAgent(ctx: DeployContext): Promise<void> {
         description: '创建 OpenClaw agent，并指定 workspace'
       }
     );
+    const createdListResult = await runCommand(
+      'nemoclaw',
+      [ctx.sandboxName, 'agents', 'list', '--json'],
+      {
+        dryRun: ctx.options.dryRun,
+        timeoutMs: 30_000,
+        description: '创建后读取 agent 列表，使用 OpenClaw 返回的实际 workspace'
+      }
+    );
+    syncExistingAgentContext(ctx, createdListResult.stdout);
     return;
   } catch (createError) {
     const listResult = await runCommand(
@@ -49,7 +59,7 @@ export async function createAgent(ctx: DeployContext): Promise<void> {
       }
     );
 
-    if (agentListContains(listResult.stdout, ctx.agentName)) {
+    if (syncExistingAgentContext(ctx, listResult.stdout)) {
       logger.info(`agent 已存在，继续后续步骤: ${ctx.agentName}`);
       return;
     }
@@ -61,25 +71,79 @@ export async function createAgent(ctx: DeployContext): Promise<void> {
 
 export function agentListContains(raw: string, agentName: string): boolean {
   try {
-    return containsAgent(JSON.parse(raw), agentName);
+    return Boolean(findAgentRecord(JSON.parse(raw), agentName));
   } catch {
     return raw.includes(`"${agentName}"`) || raw.split(/\s+/).includes(agentName);
   }
 }
 
-function containsAgent(value: unknown, agentName: string): boolean {
-  if (typeof value === 'string') return value === agentName;
-  if (Array.isArray(value)) return value.some((item) => containsAgent(item, agentName));
-  if (!value || typeof value !== 'object') return false;
+function syncExistingAgentContext(ctx: DeployContext, raw: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return agentListContains(raw, ctx.agentName);
+  }
+
+  const agent = findAgentRecord(parsed, ctx.agentName);
+  if (!agent) return false;
+
+  const liveWorkspace = readString(agent.workspace, agent.workspacePath, agent.workspaceDir);
+  if (liveWorkspace && liveWorkspace !== ctx.workspace) {
+    const configuredWorkspace = ctx.workspace;
+    logger.warn(
+      `agent ${ctx.agentName} 已存在，使用 OpenClaw 中的实际 workspace: ${liveWorkspace}（onboard.yaml 配置为 ${configuredWorkspace}）`
+    );
+    ctx.workspace = liveWorkspace;
+    ctx.env.directory = rebaseWorkspacePath(
+      ctx.env.directory,
+      configuredWorkspace,
+      liveWorkspace
+    );
+    ctx.sandbox.commands.workingDir = rebaseWorkspacePath(
+      ctx.sandbox.commands.workingDir,
+      configuredWorkspace,
+      liveWorkspace
+    );
+  }
+  return true;
+}
+
+function findAgentRecord(value: unknown, agentName: string): Record<string, unknown> | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findAgentRecord(item, agentName);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (!value || typeof value !== 'object') return undefined;
 
   const record = value as Record<string, unknown>;
   if (record.name === agentName || record.agentName === agentName || record.id === agentName) {
-    return true;
+    return record;
   }
 
   if (Object.prototype.hasOwnProperty.call(record, agentName)) {
-    return true;
+    const keyed = record[agentName];
+    if (keyed && typeof keyed === 'object' && !Array.isArray(keyed)) {
+      return keyed as Record<string, unknown>;
+    }
   }
 
-  return Object.values(record).some((item) => containsAgent(item, agentName));
+  for (const item of Object.values(record)) {
+    const found = findAgentRecord(item, agentName);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function readString(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === 'string' && value.length > 0);
+}
+
+function rebaseWorkspacePath(value: string, from: string, to: string): string {
+  if (value === from) return to;
+  if (value.startsWith(`${from}/`)) return `${to}${value.slice(from.length)}`;
+  return value;
 }

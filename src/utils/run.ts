@@ -17,6 +17,11 @@ export interface RunCommandOptions {
    * 否则子进程继承的输出管道不关闭，等待会一直挂住。
    */
   ignoreOutput?: boolean;
+  /**
+   * 将终端直接交给子进程。用于 NemoClaw installer/onboard 的官方交互向导。
+   * 交互模式不捕获或重放子进程输出。
+   */
+  interactive?: boolean;
 }
 
 export interface RunCommandResult {
@@ -70,9 +75,9 @@ export async function runCommand(
       reject: false,
       timeout: options.timeoutMs,
       forceKillAfterDelay: options.timeoutMs ? 2_000 : false,
-      stdin: 'ignore',
-      stdout: options.ignoreOutput ? 'ignore' : 'pipe',
-      stderr: options.ignoreOutput ? 'ignore' : 'pipe',
+      stdin: options.interactive ? 'inherit' : 'ignore',
+      stdout: options.interactive ? 'inherit' : options.ignoreOutput ? 'ignore' : 'pipe',
+      stderr: options.interactive ? 'inherit' : options.ignoreOutput ? 'ignore' : 'pipe',
       env: {
         ...process.env,
         NO_COLOR: '1',
@@ -81,8 +86,8 @@ export async function runCommand(
       }
     });
 
-    const stdout = maskSensitiveText(result.stdout ?? '', secrets);
-    const stderr = maskSensitiveText(result.stderr ?? '', secrets);
+    const stdout = maskSensitiveText(typeof result.stdout === 'string' ? result.stdout : '', secrets);
+    const stderr = maskSensitiveText(typeof result.stderr === 'string' ? result.stderr : '', secrets);
     const exitCode = result.exitCode ?? 0;
     const timedOut = (result as { timedOut?: boolean }).timedOut ?? false;
 
@@ -123,7 +128,7 @@ function collectSecrets(args: string[], env?: Record<string, string>): string[] 
   const secrets = new Set<string>();
 
   for (const arg of args) {
-    const envAssignment = arg.match(/^([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD)[A-Z0-9_]*)=(.+)$/i);
+    const envAssignment = arg.match(/^([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL)[A-Z0-9_]*)=(.+)$/i);
     if (envAssignment?.[2]) {
       secrets.add(envAssignment[2]);
     }
@@ -136,7 +141,7 @@ function collectSecrets(args: string[], env?: Record<string, string>): string[] 
   }
 
   for (const [key, value] of Object.entries(env ?? {})) {
-    if (/TOKEN|SECRET|PASSWORD/i.test(key) && value) {
+    if (/TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL/i.test(key) && value) {
       secrets.add(value);
     }
   }

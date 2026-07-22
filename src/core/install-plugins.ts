@@ -11,6 +11,12 @@ export interface InstallPluginsResult {
   status: 'skipped' | 'configured';
   installed: number;
   enabled: number;
+  config?: PluginConfigPlan;
+}
+
+export interface PluginConfigPlan {
+  ids: string[];
+  aliases: Record<string, string>;
 }
 
 export async function installPlugins(ctx: DeployContext): Promise<InstallPluginsResult> {
@@ -52,13 +58,13 @@ export async function installPlugins(ctx: DeployContext): Promise<InstallPlugins
 
   discovered = await listDiscoveredPlugins(ctx);
   const resolvedItems = resolvePluginItems(ctx, discovered);
-  await enablePlugins(ctx, resolvedItems);
-  await assertPluginsEnabled(ctx);
+  const config = buildPluginConfigPlan(resolvedItems);
 
   return {
     status: 'configured',
     installed: installedCount,
-    enabled: unique(resolvedItems.map((item) => item.pluginId)).length
+    enabled: config.ids.length,
+    config
   };
 }
 
@@ -72,7 +78,6 @@ interface DiscoveredPlugin {
 interface ResolvedPluginItem {
   item: PluginItemConfig;
   pluginId: string;
-  channelId?: string;
   plugin?: DiscoveredPlugin;
 }
 
@@ -143,8 +148,7 @@ function resolvePluginItems(
     return {
       item,
       plugin,
-      pluginId: plugin?.id ?? item.id,
-      channelId: item.channel ? resolveChannelId(item, plugin) : undefined
+      pluginId: plugin?.id ?? item.id
     };
   });
 }
@@ -170,13 +174,6 @@ function resolveDiscoveredPlugin(
   }
 
   return findDiscoveredPlugin(discovered, (plugin) => plugin.channelIds.includes(item.id));
-}
-
-function resolveChannelId(item: PluginItemConfig, plugin?: DiscoveredPlugin): string {
-  if (item.channelId) return item.channelId;
-  if (plugin?.channelIds.includes(item.id)) return item.id;
-  if (plugin?.channelIds.length === 1) return plugin.channelIds[0];
-  return item.id;
 }
 
 function findDiscoveredPlugin(
@@ -297,53 +294,19 @@ async function resolveRemotePluginRoot(
   return resolved;
 }
 
-async function enablePlugins(
-  ctx: DeployContext,
-  resolvedItems: ResolvedPluginItem[]
-): Promise<void> {
+function buildPluginConfigPlan(resolvedItems: ResolvedPluginItem[]): PluginConfigPlan {
   const pluginIds = unique(resolvedItems.map((item) => item.pluginId));
-  const ids = pluginIds.join(',');
   const aliases = Object.fromEntries(
     resolvedItems
       .filter((item) => item.item.id !== item.pluginId)
       .map((item) => [item.item.id, item.pluginId])
   );
-  const channelConfigs: Record<string, unknown> = {};
-  for (const resolved of resolvedItems) {
-    if (resolved.item.channel && resolved.channelId) {
-      channelConfigs[resolved.channelId] = resolved.item.channel;
-    }
-  }
-  const channelIds = Object.keys(channelConfigs);
 
-  await runCommand(
-    'nemoclaw',
-    [
-      ctx.sandboxName,
-      'exec',
-      '--',
-      'env',
-      `PLUGIN_IDS=${ids}`,
-      `PLUGIN_ALIASES_JSON=${JSON.stringify(aliases)}`,
-      `PLUGIN_CHANNELS_JSON=${JSON.stringify(channelConfigs)}`,
-      'node',
-      '-e',
-      nodeEvalScript(PATCH_PLUGINS_CONFIG_SCRIPT)
-    ],
-    {
-      dryRun: ctx.options.dryRun,
-      sensitive: true,
-      timeoutMs: 30_000,
-      description:
-        channelIds.length > 0
-          ? `在 openclaw.json 中启用插件并写入 channel 配置: ${ids}（channel: ${channelIds.join(', ')}）`
-          : `在 openclaw.json 中启用插件: ${ids}`,
-      displayCommand: `nemoclaw ${ctx.sandboxName} exec -- env PLUGIN_IDS=${ids} PLUGIN_ALIASES_JSON=****** PLUGIN_CHANNELS_JSON=****** node -e <patch-plugins-config>`
-    }
-  );
+  return { ids: pluginIds, aliases };
 }
 
-async function assertPluginsEnabled(ctx: DeployContext): Promise<void> {
+export async function verifyPluginsEnabled(ctx: DeployContext): Promise<void> {
+  if (!ctx.plugins.enabled) return;
   if (ctx.options.dryRun) return;
 
   const discovered = await listDiscoveredPlugins(ctx);
@@ -362,7 +325,7 @@ async function assertPluginsEnabled(ctx: DeployContext): Promise<void> {
         '插件配置验证失败：',
         missing.length > 0 ? `未发现插件: ${missing.join(', ')}` : '',
         disabled.length > 0 ? `插件未启用: ${disabled.join(', ')}` : '',
-        '如果插件包的真实 id 与 channel id 不同，请在 deploy.yaml 中用真实 plugin id，并设置 channelId。',
+        '如果插件包的真实 id 与 channel id 不同，请在 onboard.yaml 的 deploy.shared.plugins 中用真实 plugin id，并设置 channelId。',
         `可执行 nemoclaw ${ctx.sandboxName} exec -- openclaw plugins doctor 查看插件加载问题。`
       ]
         .filter(Boolean)
@@ -389,81 +352,4 @@ if (basename) {
 }
 
 process.stdout.write(root);
-`;
-
-const PATCH_PLUGINS_CONFIG_SCRIPT = `
-const fs = require('node:fs');
-
-const configPath = '/sandbox/.openclaw/openclaw.json';
-const ids = (process.env.PLUGIN_IDS || '')
-  .split(',')
-  .map((id) => id.trim())
-  .filter(Boolean);
-if (ids.length === 0) throw new Error('PLUGIN_IDS is required');
-const aliases = JSON.parse(process.env.PLUGIN_ALIASES_JSON || '{}');
-const channelConfigs = JSON.parse(process.env.PLUGIN_CHANNELS_JSON || '{}');
-
-const config = fs.existsSync(configPath)
-  ? JSON.parse(fs.readFileSync(configPath, 'utf8'))
-  : {};
-
-config.plugins ??= {};
-config.plugins.entries ??= {};
-
-function isPlainObject(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function deepMerge(target, source) {
-  if (!isPlainObject(target) || !isPlainObject(source)) return source;
-  const out = { ...target };
-  for (const [key, value] of Object.entries(source)) {
-    out[key] = deepMerge(out[key], value);
-  }
-  return out;
-}
-
-for (const [aliasId, pluginId] of Object.entries(aliases)) {
-  if (!aliasId || !pluginId || aliasId === pluginId) continue;
-  const aliasEntry = config.plugins.entries[aliasId];
-  if (!aliasEntry) continue;
-
-  const existingEntry = config.plugins.entries[pluginId];
-  config.plugins.entries[pluginId] = {
-    ...(isPlainObject(aliasEntry) ? aliasEntry : {}),
-    ...(isPlainObject(existingEntry) ? existingEntry : {}),
-    enabled: true,
-    config: deepMerge(
-      isPlainObject(aliasEntry?.config) ? aliasEntry.config : {},
-      isPlainObject(existingEntry?.config) ? existingEntry.config : {}
-    )
-  };
-  delete config.plugins.entries[aliasId];
-}
-
-for (const id of ids) {
-  const entry = config.plugins.entries[id];
-  config.plugins.entries[id] = {
-    ...entry,
-    enabled: true,
-    config:
-      entry && entry.config && typeof entry.config === 'object' && !Array.isArray(entry.config)
-        ? entry.config
-        : {}
-  };
-}
-
-const channelIds = Object.keys(channelConfigs);
-if (channelIds.length > 0) {
-  config.channels ??= {};
-  for (const id of channelIds) {
-    const merged = deepMerge(config.channels[id], channelConfigs[id]);
-    if (isPlainObject(merged) && merged.enabled === undefined) {
-      merged.enabled = true;
-    }
-    config.channels[id] = merged;
-  }
-}
-
-fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 `;

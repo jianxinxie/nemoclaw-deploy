@@ -26,15 +26,17 @@ OpenClaw 会加载 workspace `.env` 中的普通项目变量。因此 skill 中�
 
 不需要在 skill 中写 workspace 绝对路径，也不需要为每个 agent 安装全局 PATH 命令。
 
-## deploy.yaml 关键配置
+## onboard.yaml 关键配置
 
-Python 示例模板在 [templates/deploy.yaml](../templates/deploy.yaml)。
+Python 示例模板在 [templates/onboard.full.yaml](../templates/onboard.full.yaml) 的 `deploy.agents[]` 中。
 
 关键部分如下：
 
 ```yaml
 env:
   enabled: true
+  # 留空表示 agent workspace。
+  directory: ""
   targetFile: .env
   variables:
     APP_ENV: production
@@ -42,18 +44,19 @@ env:
     PYTHONDONTWRITEBYTECODE: "1"
     PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
-dependencies:
-  enabled: true
-  workingDir: ""
+sandbox:
   commands:
-    - python3 -m venv "$VIRTUAL_ENV"
-    - '"$PYTHON" -m pip --version'
-    - >
-      if [ -f requirements.txt ]; then
-        "$PYTHON" -m pip install -r requirements.txt;
-      else
-        echo "requirements.txt not found, skip pip install";
-      fi
+    enabled: true
+    workingDir: ""
+    items:
+      - python3 -m venv "$VIRTUAL_ENV"
+      - '"$PYTHON" -m pip --version'
+      - >
+        if [ -f requirements.txt ]; then
+          "$PYTHON" -m pip install -r requirements.txt;
+        else
+          echo "requirements.txt not found, skip pip install";
+        fi
 ```
 
 `workingDir: ""` 表示依赖命令在 workspace 根目录执行。
@@ -78,17 +81,18 @@ $WORKSPACE/.venv
 /sandbox/.openclaw/workspace-<agent>/.venv
 ```
 
-即使以后把 `dependencies.workingDir` 改成 `app`，`.venv` 仍然会在 workspace 根目录，而不是 `app/.venv`。
+即使以后把 `sandbox.commands.workingDir` 改成 `app`，`.venv` 仍然会在 workspace 根目录，而不是 `app/.venv`。
 
 ## requirements.txt 查找位置
 
-`requirements.txt` 按 `dependencies.workingDir` 解析。
+`requirements.txt` 按 `sandbox.commands.workingDir` 解析。
 
 当前模板：
 
 ```yaml
-dependencies:
-  workingDir: ""
+sandbox:
+  commands:
+    workingDir: ""
 ```
 
 所以默认查找：
@@ -100,8 +104,9 @@ $WORKSPACE/requirements.txt
 如果改成：
 
 ```yaml
-dependencies:
-  workingDir: app
+sandbox:
+  commands:
+    workingDir: app
 ```
 
 则查找：
@@ -167,10 +172,11 @@ skill 只写“如何调用”的说明：
 如果你的 Python 代码是一个可复用包，也可以在依赖命令里安装：
 
 ```yaml
-dependencies:
+sandbox:
   commands:
-    - python3 -m venv "$VIRTUAL_ENV"
-    - '"$PYTHON" -m pip install -e .'
+    items:
+      - python3 -m venv "$VIRTUAL_ENV"
+      - '"$PYTHON" -m pip install -e .'
 ```
 
 skill 中再调用：
@@ -211,7 +217,7 @@ set +a
 
 ### requirements.txt 没有被安装
 
-确认 `requirements.txt` 是否位于 `dependencies.workingDir` 指向的目录。
+确认 `requirements.txt` 是否位于 `sandbox.commands.workingDir` 指向的目录。
 
 默认 `workingDir: ""` 时，应放在：
 
@@ -239,13 +245,13 @@ $WORKSPACE/requirements.txt
 只看计划：
 
 ```bash
-nemoclaw-deploy deploy --config templates/deploy.yaml --dry-run --non-interactive
+nemoclaw-deploy deploy --config templates/onboard.full.yaml --dry-run --non-interactive
 ```
 
 实际部署：
 
 ```bash
-nemoclaw-deploy deploy --config templates/deploy.yaml --non-interactive
+nemoclaw-deploy deploy --config templates/onboard.full.yaml --non-interactive
 ```
 
 部署后验证：

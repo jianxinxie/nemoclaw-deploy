@@ -1,0 +1,219 @@
+# NemoClaw 安装、sandbox onboard 和 OpenClaw agents 部署的完整参考配置。
+schemaVersion: 3
+
+install:
+  enabled: true
+  # if-missing / reinstall
+  mode: if-missing
+  # 固定 NemoClaw 官方安装 tag，避免默认 lkg 随时间变化。
+  # 可选值：v0.0.75、其他官方 tag；如需跟随官方推荐可改成 lkg。
+  version: v0.0.88
+
+onboard:
+  # ensure / resume / fresh / recreate
+  # ensure: sandbox 可用则跳过，否则执行 onboard。
+  mode: ensure
+
+  sandbox:
+    # deploy 分区自动使用该 sandbox 名称，不需要重复配置。
+    name: demo
+    # OpenClaw sandbox 使用 openclaw；这不是 deploy.agents 中的业务 agent 名称。
+    runtime: openclaw
+    # 可选，自定义 Dockerfile 所在目录；留空使用 NemoClaw 官方镜像。
+    # 目录内必须包含名为 Dockerfile 的文件；相对路径按本 onboard.yaml 所在目录解析。
+    dockerfileDir: ""
+
+  inference:
+    # 留空时由官方交互向导选择。非交互模式必须填写 provider。
+    # 这里填写 NemoClaw 的 NEMOCLAW_PROVIDER 名字：
+    # - build: NVIDIA Endpoints
+    # - openai / anthropic / gemini: 官方云服务
+    # - custom: 其他 OpenAI-compatible endpoint，注册为 compatible-endpoint
+    # - anthropicCompatible: 其他 Anthropic-compatible endpoint，注册为 compatible-anthropic-endpoint
+    # - ollama / vllm / nim-local: 本地或 NVIDIA 推理
+    # 其他可选值：hermes-provider、routed、install-vllm、install-ollama、install-windows-ollama、start-windows-ollama。
+    provider: ""
+    model: ""
+    # 兼容模型服务 URL，对应 NemoClaw 的 NEMOCLAW_ENDPOINT_URL。
+    # custom 示例：https://api.openai-compatible.example/v1
+    # anthropicCompatible 示例：https://api.anthropic-compatible.example
+    endpointUrl: ""
+    # 可选值：openai-completions / openai-responses / anthropic-messages
+    # 留空时由 NemoClaw 自动探测或选择默认值。
+    preferredApi: ""
+    apiKey:
+      # 交互执行时，在真正需要 onboard 前隐藏输入新 key，可覆盖旧 key且不会写回 YAML。
+      # --non-interactive 时忽略该开关，改用 value 或 fromEnv。
+      promptInInteractive: true
+      # 直接填写模型服务 API key；日志会脱敏，但不要提交真实 key 到 git。
+      value: ""
+      # CLI 会按 provider 自动映射到 NemoClaw 需要的 credential 名称。
+
+  gpu:
+    # auto / enabled / disabled
+    host: auto
+    sandbox: auto
+    # 仅 sandbox=enabled 时可填写 OpenShell GPU device selector。
+    device: ""
+
+  policy:
+    # restricted / balanced / open
+    tier: balanced
+    # suggested / custom / skip
+    # 完整模板默认显式选择常用开发和通用访问策略，便于审查实际开放范围。
+    mode: custom
+    # mode=custom 时必须至少填写一个 preset。
+    # 以下名称均来自 NemoClaw v0.0.75；请删除当前 sandbox 不需要的权限。
+    presets:
+      - npm
+      - pypi
+      - github
+      - huggingface
+      - brew
+      - openclaw-pricing
+      - public-reference
+      - weather
+    # 按需添加，不建议默认开放：
+    # - brave / tavily：需要对应搜索服务配置。
+    # - local-inference：访问主机侧 Ollama/vLLM。
+    # - slack / discord / telegram / wechat / whatsapp / teams / jira / outlook：第三方集成。
+
+  openclaw:
+    # progressive / direct
+    toolDisclosure: progressive
+    # brave / tavily / none；API key 通过当前进程环境提供，不写入 YAML。
+    webSearchProvider: none
+    agentTimeout: null
+
+  services:
+    # 以及默认推理/代理端口 8000、11434、11435。
+    openShellGatewayPort: null
+    # 其他服务端口范围 1024-65535；null 使用 NemoClaw 默认值。
+    dashboardPort: null
+    controlUiPort: null
+    vllmPort: null
+    ollamaPort: null
+
+  timeouts:
+    # 单位秒；null 使用 NemoClaw 默认值。
+    ollamaPull: null
+    localInference: null
+    sandboxReady: null
+
+  options:
+    # 非交互模式必须显式设置为 true。
+    acceptThirdPartySoftware: false
+    yes: false
+    noOllamaAutostart: false
+
+  # 只允许额外的非敏感 NEMOCLAW_* 变量。
+  # secret、token、password、API key 不允许写入这里。
+  environment: {}
+
+# sandbox 创建成功后执行的 OpenClaw 部署。
+deploy:
+  # 以下配置对 sandbox 中的所有 OpenClaw agents 共享，只执行一次。
+  shared:
+    plugins:
+      enabled: false
+      items:
+        - id: wecom-openclaw-plugin
+          channelId: wecom
+          source: "@wecom/wecom-openclaw-plugin"
+        - id: advbot
+          source: "@advantech-axa/advbot"
+
+    # 可选的不完整 openclaw.json，以现有配置为基线递归合并。
+    # tools、channels 等 OpenClaw 业务配置统一放在该文件中。
+    # 不允许配置 agents；agent model 请在下面对应 agent 中配置。
+    openclawConfig:
+      enabled: false
+      file: ./openclaw.json
+
+    # ChannelServer 用于补充 advbot 动态 gateway 字段和注册 agents。
+    channelServer:
+      enabled: true
+      advbotAccountId: default
+      url: http://127.0.0.1:8086
+
+    networkPolicy:
+      enabled: true
+      # 支持单个 .yaml/.yml 文件或包含多个 policy 的目录。
+      dir: ./policies
+
+    options:
+      # 所有 agent 和共享配置处理完成后，只重启一次 gateway。
+      restartGateway: false
+
+  agents:
+    - name: test
+
+      # 留空时默认 /sandbox/.openclaw/workspace-${name}。
+      workspace: ""
+
+      # 留空时保留 OpenClaw/onboard 为该 agent 设置的模型。
+      model: ""
+
+      agentContent:
+        enabled: true
+        hostDir: ./workspace
+        # ask / skip / backup / overwrite / fail
+        conflictStrategy: ask
+        ignore:
+          - .git
+          - node_modules
+          - "*.log"
+          - .venv
+          - __pycache__
+          - .pytest_cache
+          - "*.pyc"
+
+      skill:
+        enabled: true
+        hostDir: ./workspace/skills
+
+      # 面向当前 agent 的通用 sandbox 操作。
+      sandbox:
+        # 把主机文件或目录上传到 sandbox 任意绝对路径。
+        # source 相对路径按 onboard.yaml 所在目录解析。
+        uploads:
+          enabled: true
+          items:
+            - source: ./agent-content/scripts
+              destination: /sandbox/opt/python-agent/scripts
+              overwrite: true
+
+        # 在 sandbox 指定工作目录中按顺序执行 shell 命令。
+        # workingDir 留空时使用当前 agent workspace。
+        commands:
+          enabled: true
+          workingDir: ""
+          items:
+            - python3 -m venv "$VIRTUAL_ENV"
+            - '"$PYTHON" -m pip --version'
+            - >
+              if [ -f requirements.txt ]; then
+                "$PYTHON" -m pip install -r requirements.txt;
+              else
+                echo "requirements.txt not found, skip pip install";
+              fi
+          continueOnError: false
+
+      # 开启后调用 <deploy.shared.channelServer.url>/v1/openclaw/agents。
+      channelRegistration:
+        enabled: false
+        # 注册接口不可用时是否继续部署；默认为 true。
+        continueOnError: true
+
+      env:
+        enabled: true
+        # 留空时写入 agent workspace；相对路径位于 workspace 内，也支持 sandbox 绝对路径。
+        directory: ""
+        targetFile: .env
+        variables:
+          APP_ENV: production
+          PYTHONUNBUFFERED: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    # 添加更多 agent 时复制上面的条目，并使用独立 name/workspace/hostDir。

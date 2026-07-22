@@ -1,5 +1,4 @@
 import type { DeployContext } from './context.js';
-import { ensureAdvbotPluginConfig } from './configure-channel.js';
 import { runCommand } from '../utils/run.js';
 
 export async function precheck(ctx: DeployContext): Promise<void> {
@@ -26,10 +25,6 @@ export async function precheck(ctx: DeployContext): Promise<void> {
     );
   }
 
-  if (ctx.channel.enabled) {
-    await ensureAdvbotPluginConfig(ctx);
-  }
-
   try {
     await runCommand('nemoclaw', [ctx.sandboxName, 'exec', '--', 'openclaw', 'config', 'validate'], {
       dryRun: ctx.options.dryRun,
@@ -47,7 +42,7 @@ export async function precheck(ctx: DeployContext): Promise<void> {
           '可先尝试修复：',
           `nemoclaw ${ctx.sandboxName} exec -- openclaw doctor --fix --non-interactive`,
           '',
-          '如果当前 OpenClaw 版本不支持 advbot，请移除 channels.advbot，或在 deploy.yaml 中设置 channel.enabled: false。',
+          '如果当前 OpenClaw 版本不支持 advbot，请移除 channels.advbot，或在 onboard.yaml 中设置 deploy.shared.channelServer.enabled: false。',
           '',
           detail
         ].join('\n')

@@ -1,6 +1,8 @@
 # nemoclaw-deploy Roadmap
 
-本项目目标是提供一个安全、可发布的 Node.js / TypeScript CLI，用于在已经存在的 NemoClaw sandbox 中部署 OpenClaw agent。
+本项目目标是提供一个安全、可发布的 Node.js / TypeScript CLI，用于安装/onboard NemoClaw，并向目标 sandbox 部署一个或多个 OpenClaw agent。
+
+当前使用单一 `schemaVersion: 3` 的 `onboard.yaml`，其中 `install/onboard/deploy` 分别管理安装、sandbox 生命周期和 OpenClaw agents。
 
 ## 版本规划
 
@@ -9,7 +11,7 @@
 目标：完成 AGENTS.md 中定义的核心部署链路，并通过本地构建、打包和 CLI smoke test。
 
 - npm CLI 包结构
-- `deploy`、`doctor`、`init-config` 命令
+- `up`、`bootstrap`、`deploy`、`doctor`、`init-config` 命令
 - YAML 配置文件读取与模板输出
 - 交互式补全缺失字段
 - 非交互模式严格失败
@@ -19,7 +21,7 @@
 - skills 目录批量安装
 - gateway token 自动获取和脱敏输出
 - dashboard URL 到 gateway URL 推导
-- advbot channel 配置与 patch fallback
+- OpenClaw partial overlay、插件启用状态与 ChannelServer 动态字段单次原子配置事务
 - network policy 目录批量应用
 - channel recover 与基础验证
 
@@ -27,9 +29,9 @@
 
 目标：支持部署后完成 workspace 级别运行环境初始化。
 
-- workspace env 合并写入
+- agent env 按可配置目录合并写入
 - 从本机环境变量读取 secret，并在日志中脱敏
-- workspace 依赖安装命令
+- agent sandbox 指定目录命令执行
 - network policy 应用后不再触发 recover
 - 部署计划和完成摘要展示 env/dependency 状态
 
@@ -67,8 +69,8 @@ npm pack
 npm install -g ./your-scope-nemoclaw-deploy-0.1.0.tgz
 nemoclaw-deploy --help
 nemoclaw-deploy doctor
-nemoclaw-deploy init-config --output deploy.yaml
-nemoclaw-deploy deploy --config deploy.yaml --dry-run
+nemoclaw-deploy init-config --output onboard.yaml
+nemoclaw-deploy deploy --config onboard.yaml --dry-run
 ```
 
-真实 NemoClaw 环境中，`nemoclaw-deploy deploy --config deploy.yaml` 应能完成 agent 创建、内容上传、skills 目录批量安装、advbot channel 配置、network policy 目录批量应用和基础验证。
+真实 NemoClaw 环境中，`nemoclaw-deploy deploy --config onboard.yaml` 应能完成 agent 创建、sandbox 文件/目录上传、指定目录命令执行、skills 安装、advbot 动态配置、network policy 应用和基础验证。

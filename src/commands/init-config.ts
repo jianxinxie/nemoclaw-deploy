@@ -8,8 +8,7 @@ export interface InitConfigOptions {
 }
 
 export async function initConfigCommand(options: InitConfigOptions): Promise<void> {
-  const template = await fs.readFile(templatePath('deploy.yaml'), 'utf8');
-
+  const template = await fs.readFile(templatePath('onboard.yaml'), 'utf8');
   if (!options.output) {
     process.stdout.write(template);
     return;

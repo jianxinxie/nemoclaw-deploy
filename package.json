@@ -1,7 +1,7 @@
 {
   "name": "@advantech-axa/nemoclaw-deploy",
-  "version": "0.2.0",
-  "description": "Safe OpenClaw agent deployment helper for existing NemoClaw sandboxes.",
+  "version": "0.0.6",
+  "description": "Install and onboard NemoClaw, then safely deploy one or more OpenClaw agents.",
   "type": "module",
   "bin": {
     "nemoclaw-deploy": "./bin/nemoclaw-deploy.js"

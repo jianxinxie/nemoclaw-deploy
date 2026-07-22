@@ -6,6 +6,10 @@ export const sandboxNameSchema = z.string().regex(/^[a-zA-Z0-9._-]+$/, {
   message: 'sandboxName 只能包含字母、数字、点、下划线和短横线'
 });
 
+export const onboardSandboxNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,61}[a-z0-9]$|^[a-z]$/, {
+  message: 'onboard sandbox 名称必须为 1-63 位，以小写字母开头，只能包含小写字母、数字和内部短横线'
+});
+
 export const agentNameSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/, {
   message: 'agentName 必须以小写字母开头，只能包含小写字母、数字、下划线和短横线，最长 32 位'
 });
@@ -30,6 +34,10 @@ export function stripAngleBrackets(value: string): string {
 
 export function validateSandboxName(value: string): string {
   return sandboxNameSchema.parse(value);
+}
+
+export function validateOnboardSandboxName(value: string): string {
+  return onboardSandboxNameSchema.parse(value.trim());
 }
 
 export function validateAgentName(value: string): string {
@@ -58,12 +66,13 @@ export function validatePluginSource(value: string): string {
   return source;
 }
 
-export const toolsProfileSchema = z.string().regex(/^[a-zA-Z0-9._-]{1,64}$/, {
-  message: 'tools.profile 只能包含字母、数字、点、下划线和短横线，最长 64 位'
-});
-
-export function validateToolsProfile(value: string): string {
-  return toolsProfileSchema.parse(value.trim());
+export function validateAgentModel(value: string): string {
+  const model = value.trim();
+  if (!model) throw new Error('deploy.agents[].model 不能为空字符串');
+  if (model.includes('\0') || /[\r\n]/.test(model)) {
+    throw new Error('deploy.agents[].model 不能包含空字符或换行');
+  }
+  return model;
 }
 
 export function validateIgnorePattern(value: string): string {
@@ -141,18 +150,33 @@ export function validateEnvTargetFile(value: string): string {
     throw new Error('env.targetFile 不能包含空字符');
   }
   if (path.isAbsolute(cleaned)) {
-    throw new Error('env.targetFile 必须是相对 workspace 的路径');
+    throw new Error('env.targetFile 必须是相对 env.directory 的路径');
   }
 
   const normalized = path.posix.normalize(cleaned.replace(/\\/g, '/'));
   if (!normalized || normalized === '.' || normalized.startsWith('../') || normalized === '..') {
-    throw new Error('env.targetFile 必须位于 workspace 内');
+    throw new Error('env.targetFile 必须位于 env.directory 内');
   }
   if (normalized.endsWith('/')) {
     throw new Error('env.targetFile 必须是文件路径，不能是目录');
   }
 
   return normalized;
+}
+
+export function validateEnvDirectory(value: string | undefined, workspace: string): string {
+  const raw = value?.trim();
+  if (!raw) return workspace;
+  if (raw.includes('\0') || /[\r\n]/.test(raw)) {
+    throw new Error('env.directory 不能包含空字符或换行');
+  }
+  if (raw.startsWith('/')) return path.posix.normalize(raw);
+
+  const normalized = path.posix.normalize(raw.replace(/\\/g, '/'));
+  if (normalized === '..' || normalized.startsWith('../')) {
+    throw new Error('env.directory 相对路径必须位于 workspace 内');
+  }
+  return path.posix.join(workspace, normalized);
 }
 
 export function validateEnvValue(name: string, value: string): string {
@@ -165,10 +189,10 @@ export function validateEnvValue(name: string, value: string): string {
 export function validateDependencyCommand(value: string): string {
   const command = value.trim();
   if (!command) {
-    throw new Error('dependencies.commands 不能包含空命令');
+    throw new Error('sandbox.commands.items 不能包含空命令');
   }
   if (command.includes('\0')) {
-    throw new Error('dependencies.commands 不能包含空字符');
+    throw new Error('sandbox.commands.items 不能包含空字符');
   }
   return command;
 }
@@ -177,15 +201,42 @@ export function validateDependencyWorkingDir(value: string | undefined, workspac
   const raw = value?.trim();
   if (!raw) return workspace;
   if (raw.includes('\0')) {
-    throw new Error('dependencies.workingDir 不能包含空字符');
+    throw new Error('sandbox.commands.workingDir 不能包含空字符');
   }
   if (raw.startsWith('/')) return path.posix.normalize(raw);
 
   const normalized = path.posix.normalize(raw.replace(/\\/g, '/'));
   if (normalized === '..' || normalized.startsWith('../')) {
-    throw new Error('dependencies.workingDir 相对路径必须位于 workspace 内');
+    throw new Error('sandbox.commands.workingDir 相对路径必须位于 workspace 内');
   }
   return path.posix.join(workspace, normalized);
+}
+
+export function validateSandboxCopyDestination(value: string): string {
+  const raw = value.trim();
+  if (!raw) {
+    throw new Error('sandbox.uploads.items[].destination 是必填字段');
+  }
+  if (raw.includes('\0') || /[\r\n]/.test(raw)) {
+    throw new Error('sandbox.uploads.items[].destination 不能包含空字符或换行');
+  }
+  if (!raw.startsWith('/')) {
+    throw new Error(`sandbox.uploads.items[].destination 必须是 sandbox 绝对路径: ${raw}`);
+  }
+  const normalized = path.posix.normalize(raw);
+  if (normalized === '/') {
+    throw new Error('sandbox.uploads.items[].destination 不能是 sandbox 根目录');
+  }
+  return normalized.replace(/\/+$/, '');
+}
+
+export async function validateHostFileOrDirectory(source: string): Promise<string> {
+  const resolved = path.resolve(source);
+  const stat = await fs.stat(resolved).catch(() => null);
+  if (!stat || (!stat.isFile() && !stat.isDirectory())) {
+    throw new Error(`sandbox.uploads.items[].source 不是有效的主机文件或目录: ${source}`);
+  }
+  return resolved;
 }
 
 export async function validateAgentContentDir(hostDir: string): Promise<string> {

@@ -1,0 +1,163 @@
+# NemoClaw 日常部署精简配置。
+# 未列出的字段使用 CLI 默认值；完整字段见 onboard.full.yaml。
+schemaVersion: 3
+
+# 通常只需要调整目标版本。
+install:
+  enabled: true
+  # if-missing / reinstall
+  mode: if-missing
+  version: v0.0.88
+
+onboard:
+  # ensure / resume / fresh / recreate
+  # ensure: sandbox 可用则跳过，否则执行 onboard。
+  mode: ensure
+
+  sandbox:
+    # 必填：sandbox 名称。
+    name: demo
+    # 留空使用 NemoClaw 官方镜像；填写时目录内必须包含名为 Dockerfile 的文件。
+    dockerfileDir: ""
+
+  # 首次创建或重建 sandbox 时使用；留空则由官方交互向导选择。
+  # - custom: 其他 OpenAI-compatible endpoint，注册为 compatible-endpoint
+  # - anthropicCompatible: 其他 Anthropic-compatible endpoint，注册为 compatible-anthropic-endpoint
+  inference:
+    provider: ""
+    model: ""
+    # 兼容模型服务 URL，对应 NemoClaw 的 NEMOCLAW_ENDPOINT_URL。
+    endpointUrl: ""
+    # 可选值：openai-completions / openai-responses / anthropic-messages
+    # 留空时由 NemoClaw 自动探测或选择默认值。
+    preferredApi: ""
+    apiKey:
+      # 交互执行时，在真正需要 onboard 前隐藏输入新 key，可覆盖旧 key 且不会写回 YAML。
+      # --non-interactive 时忽略该开关，改用 value 或 fromEnv。
+      promptInInteractive: true
+      # 直接填写模型服务 API key；日志会脱敏，但不要提交真实 key 到 git。
+      value: ""
+      # CLI 会按 provider 自动映射到 NemoClaw 需要的 credential 名称。
+  
+  policy:
+    # restricted / balanced / open
+    tier: balanced
+    # suggested / custom / skip
+    # 完整模板默认显式选择常用开发和通用访问策略，便于审查实际开放范围。
+    mode: custom
+    # mode=custom 时必须至少填写一个 preset。
+    presets:
+      - npm
+      - pypi
+      - github
+      - huggingface
+      - brew
+      - openclaw-pricing
+      - public-reference
+      - weather
+
+  # 使用 --non-interactive 时必须改为 true。
+  options:
+    acceptThirdPartySoftware: false
+
+deploy:
+  shared:
+    # 插件安装信息保留在 YAML；插件业务配置放在 openclaw.json overlay。
+    plugins:
+      enabled: false
+      items:
+        - id: wecom-openclaw-plugin
+          channelId: wecom
+          source: "@wecom/wecom-openclaw-plugin"
+        - id: advbot
+          source: "@advantech-axa/advbot"
+
+    # OpenClaw 的 models、tools、channels 等配置从 partial 文件合并。
+    openclawConfig:
+      enabled: false
+      file: ./openclaw.json
+
+    # ChannelServer 用于补充 advbot 动态 gateway 字段和注册 agents。
+    channelServer:
+      enabled: true
+      advbotAccountId: default
+      url: http://127.0.0.1:8086
+
+    networkPolicy:
+      enabled: true
+      # 支持单个 .yaml/.yml 文件或包含多个 policy 的目录。
+      dir: ./policies
+
+    options:
+      # 所有 agent 和共享配置处理完成后，只重启一次 gateway。
+      restartGateway: false
+
+  agents:
+    - name: my-agent
+      
+      # 留空时默认 /sandbox/.openclaw/workspace-${name}。
+      workspace: ""
+
+      agentContent:
+        enabled: true
+        hostDir: ./agent-content
+        # ask / skip / backup / overwrite / fail
+        conflictStrategy: ask
+        ignore:
+          - .git
+          - node_modules
+          - "*.log"
+          - .venv
+          - __pycache__
+          - .pytest_cache
+          - "*.pyc"
+
+      skill:
+        enabled: true
+        hostDir: ./agent-content/skills
+
+      # 面向当前 agent 的通用 sandbox 操作。
+      sandbox:
+        # 把主机文件或目录上传到 sandbox 任意绝对路径。
+        # source 相对路径按 onboard.yaml 所在目录解析。
+        uploads:
+          enabled: true
+          items:
+            - source: ./agent-content/scripts
+              destination: /sandbox/opt/python-agent/scripts
+              overwrite: true
+
+        # 在 sandbox 指定工作目录中按顺序执行 shell 命令。
+        # workingDir 留空时使用当前 agent workspace。
+        commands:
+          enabled: true
+          workingDir: ""
+          items:
+            - python3 -m venv "$VIRTUAL_ENV"
+            - '"$PYTHON" -m pip --version'
+            - >
+              if [ -f requirements.txt ]; then
+                "$PYTHON" -m pip install -r requirements.txt;
+              else
+                echo "requirements.txt not found, skip pip install";
+              fi
+          continueOnError: false
+
+      # 开启后调用 <deploy.shared.channelServer.url>/v1/openclaw/agents。
+      channelRegistration:
+        enabled: false
+        # 注册接口不可用时是否继续部署；默认为 true。
+        continueOnError: true
+
+      env:
+        enabled: true
+        # 留空时写入 agent workspace；相对路径位于 workspace 内，也支持 sandbox 绝对路径。
+        directory: ""
+        targetFile: .env
+        variables:
+          APP_ENV: production
+          PYTHONUNBUFFERED: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    # 添加更多 agent 时复制上面的条目，并使用独立 name/workspace/hostDir。

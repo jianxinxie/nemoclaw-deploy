@@ -1,288 +1,306 @@
 import { confirm } from '@inquirer/prompts';
-import type { DeployContext } from '../core/context.js';
-import { collectDeployContext, type DeployCliOptions } from '../core/context.js';
+import type { DeployContext, DeployPlan } from '../core/context.js';
+import { collectDeployPlan, type DeployCliOptions } from '../core/context.js';
 import { precheck } from '../core/precheck.js';
 import { createAgent } from '../core/create-agent.js';
 import { uploadAgentContent } from '../core/upload-agent-content.js';
+import { uploadSandboxFiles } from '../core/copy-files.js';
 import { installSkill } from '../core/install-skill.js';
-import { installPlugins } from '../core/install-plugins.js';
-import { configureChannel } from '../core/configure-channel.js';
-import { configureTools } from '../core/configure-tools.js';
+import { installPlugins, verifyPluginsEnabled } from '../core/install-plugins.js';
+import {
+  prepareChannelServer,
+  verifyAdvbotChannelSupported
+} from '../core/configure-channel.js';
+import {
+  applyOpenClawConfig,
+  validateOpenClawPartialFile
+} from '../core/apply-openclaw-config.js';
 import { restartGateway, type RestartGatewayResult } from '../core/restart-gateway.js';
 import { applyPolicy } from '../core/apply-policy.js';
 import { configureEnv } from '../core/configure-env.js';
-import { installDependencies } from '../core/install-dependencies.js';
+import { executeSandboxCommands } from '../core/install-dependencies.js';
+import {
+  agentRegistrationUrl,
+  precheckAgentRegistration,
+  registerAgent,
+  type RegisterAgentResult
+} from '../core/register-agent.js';
 import { verifyDeployment } from '../core/verify.js';
 import { logger } from '../utils/logger.js';
 import { maskSecret } from '../utils/mask.js';
 import { runCommand } from '../utils/run.js';
-import { validateAgentContentDir } from '../utils/validators.js';
+import {
+  validateAgentContentDir,
+  validateHostFileOrDirectory
+} from '../utils/validators.js';
+
+interface AgentDeploySummary {
+  name: string;
+  workspace: string;
+  model?: string;
+  agentContent: 'skipped' | 'applied';
+  fileCopies: { status: 'skipped' | 'uploaded'; count: number };
+  skill: { status: 'skipped' | 'installed'; count: number };
+  env: { status: 'skipped' | 'configured'; targetFile?: string; count: number };
+  dependencies: { status: 'skipped' | 'executed' | 'partial'; count: number };
+  channelRegistration: RegisterAgentResult;
+}
 
 interface DeploySummary {
-  agentContent: 'skipped' | 'applied';
-  skill: {
-    status: 'skipped' | 'installed';
-    count: number;
-  };
-  plugins: {
-    status: 'skipped' | 'configured';
-    installed: number;
-    enabled: number;
-  };
-  tools: {
-    status: 'skipped' | 'configured';
-    profile?: string;
-  };
-  channel: {
+  agents: AgentDeploySummary[];
+  plugins: { status: 'skipped' | 'configured'; installed: number; enabled: number };
+  openclawConfig: { status: 'unchanged' | 'applied' };
+  channelServer: {
     status: 'skipped' | 'configured';
     restarted: boolean;
     reason?: 'disabled' | 'existing';
   };
-  networkPolicy: {
-    status: 'skipped' | 'applied';
-    count: number;
-  };
-  env: {
-    status: 'skipped' | 'configured';
-    targetFile?: string;
-    count: number;
-  };
-  dependencies: {
-    status: 'skipped' | 'installed' | 'partial';
-    count: number;
-  };
+  networkPolicy: { status: 'skipped' | 'applied'; count: number };
   gatewayRestart: RestartGatewayResult;
 }
 
-export async function deployCommand(options: DeployCliOptions): Promise<void> {
-  const ctx = await collectDeployContext(options);
-  printPlan(ctx);
+export async function deployCommand(options: DeployCliOptions): Promise<boolean> {
+  const plan = await collectDeployPlan(options);
+  printPlan(plan);
 
-  if (ctx.options.dryRun) {
+  if (options.dryRun) {
     logger.warn('dry-run 模式：仅展示部署计划，不执行真实命令。');
-    return;
+    return true;
   }
 
-  if (!ctx.options.nonInteractive) {
-    const shouldContinue = await confirm({
-      message: '确认执行以上部署计划？',
-      default: true
-    });
+  if (!options.nonInteractive) {
+    const shouldContinue = await confirm({ message: '确认执行以上部署计划？', default: true });
     if (!shouldContinue) {
       logger.warn('部署已取消。');
-      return;
+      return false;
     }
   }
 
-  await validateRuntimeResources(ctx);
+  await Promise.all(plan.agents.map(validateRuntimeResources));
 
+  const shared = plan.agents[0];
   const summary: DeploySummary = {
-    agentContent: 'skipped',
-    skill: { status: 'skipped', count: 0 },
+    agents: plan.agents.map((ctx) => ({
+      name: ctx.agentName,
+      workspace: ctx.workspace,
+      model: ctx.model,
+      agentContent: 'skipped',
+      fileCopies: { status: 'skipped', count: 0 },
+      skill: { status: 'skipped', count: 0 },
+      env: { status: 'skipped', count: 0 },
+      dependencies: { status: 'skipped', count: 0 },
+      channelRegistration: 'skipped'
+    })),
     plugins: { status: 'skipped', installed: 0, enabled: 0 },
-    tools: { status: 'skipped' },
-    channel: { status: 'skipped', restarted: false, reason: 'disabled' },
+    openclawConfig: { status: 'unchanged' },
+    channelServer: { status: 'skipped', restarted: false, reason: 'disabled' },
     networkPolicy: { status: 'skipped', count: 0 },
-    env: { status: 'skipped', count: 0 },
-    dependencies: { status: 'skipped', count: 0 },
     gatewayRestart: 'skipped'
   };
-  let remoteTempCleaned = false;
-  let remoteTempMayExist = false;
+  let cleanupCompleted = false;
 
   try {
-    logger.step('执行预检查...');
-    logger.info('确认 nemoclaw 命令可用，并检查 sandbox 状态是否可读取。');
-    await precheck(ctx);
+    logger.step('执行 sandbox 预检查...');
+    await precheck(shared);
+    await precheckAgentRegistration(plan.agents);
 
-    logger.step('创建或确认 agent...');
-    logger.info('尝试创建 agent；如果 agent 已存在，会确认列表后继续。');
-    await createAgent(ctx);
+    logger.step(`创建或确认 ${plan.agents.length} 个 agent...`);
+    for (const [index, ctx] of plan.agents.entries()) {
+      await createAgent(ctx);
+      summary.agents[index].workspace = ctx.workspace;
+    }
+    assertResolvedWorkspaces(plan.agents);
 
-    logger.step('处理 agent 初始化内容...');
-    logger.info('先上传到 sandbox 临时目录，再按冲突策略合并到 workspace，避免直接覆盖已有文件。');
-    remoteTempMayExist ||= ctx.agentContent.enabled;
-    summary.agentContent = await uploadAgentContent(ctx);
+    logger.step('处理各 agent 初始化内容...');
+    for (const [index, ctx] of plan.agents.entries()) {
+      logger.info(`处理 agent ${ctx.agentName} 的 workspace 初始化内容。`);
+      summary.agents[index].agentContent = await uploadAgentContent(ctx);
+    }
 
-    logger.step('安装 skills...');
-    logger.info('扫描 skills 主机目录下包含 SKILL.md 的所有 skill，并逐个执行 nemoclaw skill install。');
-    summary.skill = await installSkill(ctx);
+    logger.step('执行各 agent 的 sandbox 文件/目录上传...');
+    for (const [index, ctx] of plan.agents.entries()) {
+      summary.agents[index].fileCopies = await uploadSandboxFiles(ctx);
+    }
 
-    logger.step('安装 OpenClaw 插件...');
-    logger.info('安装缺失的插件，然后在 openclaw.json 中启用并加入 plugins.allow。');
-    remoteTempMayExist ||= ctx.plugins.enabled && ctx.plugins.items.some((item) => item.sourceKind === 'path');
-    summary.plugins = await installPlugins(ctx);
+    logger.step('安装各 agent skills...');
+    for (const [index, ctx] of plan.agents.entries()) {
+      logger.info(`安装 agent ${ctx.agentName} 的 skills。`);
+      summary.agents[index].skill = await installSkill(ctx);
+    }
 
-    logger.step('配置 OpenClaw tools...');
-    logger.info('设置 tools.profile（默认 coding），并深合并额外 tools 配置，保留已有 toolSearch/web 等设置。');
-    summary.tools = await configureTools(ctx);
+    logger.step('安装 sandbox 共享 OpenClaw 插件...');
+    summary.plugins = await installPlugins(shared);
 
-    logger.step('配置 advbot channel...');
-    logger.info('先检查 advbot channel 是否已存在；未配置时再补齐 gateway token 和 gateway URL。');
-    remoteTempMayExist ||= ctx.channel.enabled;
-    summary.channel = await configureChannel(ctx);
+    logger.step('准备 ChannelServer 与 advbot 动态连接配置...');
+    summary.channelServer = await prepareChannelServer(shared);
+    copyResolvedChannelServer(plan.agents, shared);
 
-    logger.step('应用 network policies...');
-    logger.info('扫描 network policy 目录下的 .yaml/.yml 文件，并逐个执行 policy-add。');
-    summary.networkPolicy = await applyPolicy(ctx);
+    logger.step('统一合并并提交 OpenClaw 配置...');
+    summary.openclawConfig = await applyOpenClawConfig({
+      contexts: plan.agents,
+      plugins: summary.plugins,
+      channelServer: summary.channelServer
+    });
+    await verifyPluginsEnabled(shared);
+    await verifyAdvbotChannelSupported(shared);
 
-    logger.step('配置 workspace env...');
-    logger.info('把配置中的 workspace env 变量合并写入 workspace env 文件，不写入 sandbox 全局环境。');
-    remoteTempMayExist ||= ctx.env.enabled;
-    summary.env = await configureEnv(ctx);
+    logger.step('应用 sandbox 共享 network policies...');
+    summary.networkPolicy = await applyPolicy(shared);
 
-    logger.step('安装 workspace 依赖...');
-    logger.info('在 agent workspace 中执行依赖安装命令，依赖是否可联网由当前 network policy 决定。');
-    summary.dependencies = await installDependencies(ctx);
+    logger.step('配置各 agent env...');
+    for (const [index, ctx] of plan.agents.entries()) {
+      summary.agents[index].env = await configureEnv(ctx);
+    }
 
-    logger.step('执行基础验证...');
-    logger.info('确认 agent 可在列表中看到，sandbox status 可读取，并检查 channel/policy 的关键结果。');
-    await verifyDeployment(ctx, { policyApplied: summary.networkPolicy.status === 'applied' });
+    logger.step('执行各 agent 的 sandbox commands...');
+    for (const [index, ctx] of plan.agents.entries()) {
+      summary.agents[index].dependencies = await executeSandboxCommands(ctx);
+    }
 
-    await cleanupRemoteTemp(ctx);
-    remoteTempCleaned = true;
+    logger.step('执行所有 agent 的基础验证...');
+    for (const ctx of plan.agents) {
+      await verifyDeployment(ctx, { policyApplied: summary.networkPolicy.status === 'applied' });
+    }
 
-    if (ctx.options.restartGateway) {
+    await cleanupAllRemoteTemp(plan.agents);
+    cleanupCompleted = true;
+
+    if (shared.options.restartGateway) {
       logger.step('重启 OpenClaw 网关...');
-      logger.info('部署改动已完成；现在重启 OpenClaw gateway，使插件、channel 和 tools 配置生效。');
       summary.gatewayRestart = await restartGateway(
-        ctx,
-        '重启 OpenClaw 网关，使插件、channel 和 tools 配置生效'
+        shared,
+        '全部 agent 和 sandbox 共享配置已完成，统一重启一次 OpenClaw gateway'
       );
     } else if (
       summary.plugins.status === 'configured' ||
-      summary.tools.status === 'configured' ||
-      summary.channel.status === 'configured'
+      summary.channelServer.status === 'configured' ||
+      summary.openclawConfig.status === 'applied'
     ) {
       logger.warn(
-        `OpenClaw 配置已更新，但网关尚未重启，重启前可能不会生效。可执行 nemoclaw ${ctx.sandboxName} gateway restart，或在配置中设置 options.restartGateway: true。`
+        `OpenClaw 配置已更新，但网关尚未重启。可执行 nemoclaw ${shared.sandboxName} gateway restart。`
       );
     }
 
-    printSummary(ctx, summary);
+    logger.step('向 channel server 注册已启用的 agents...');
+    for (const [index, ctx] of plan.agents.entries()) {
+      summary.agents[index].channelRegistration = await registerAgent(ctx);
+    }
+
+    printSummary(plan, summary);
+    return true;
   } finally {
-    if (remoteTempMayExist && !remoteTempCleaned) {
+    if (!cleanupCompleted) {
       logger.info('部署未完成，开始清理 sandbox 临时目录。');
-      await cleanupRemoteTemp(ctx);
+      await cleanupAllRemoteTemp(plan.agents);
     }
   }
 }
 
-function printPlan(ctx: DeployContext): void {
+function printPlan(plan: DeployPlan): void {
+  const shared = plan.agents[0];
   logger.info('');
   logger.step('部署计划');
   printBlock('目标', [
-    ['Sandbox', ctx.sandboxName],
-    ['Agent', ctx.agentName],
-    ['Workspace', ctx.workspace]
+    ['Sandbox', plan.sandboxName],
+    ['Agents', String(plan.agents.length)],
+    ['Schema', `v${plan.schemaVersion}`]
   ]);
-  printBlock('内容', [
-    ['Agent Content', enabledLabel(ctx.agentContent.enabled)],
-    ['Agent Content Dir', ctx.agentContent.hostDir ?? '-'],
-    ['Conflict Strategy', ctx.agentContent.enabled ? ctx.agentContent.conflictStrategy : '-'],
-    ['Ignore', formatList(ctx.agentContent.ignore)],
-    ['Skills', ctx.skill.enabled ? `enabled (${ctx.skill.hostDir ?? '-'})` : 'disabled']
-  ]);
-  printBlock('OpenClaw 配置', [
-    ['Plugins', ctx.plugins.enabled ? `enabled (${ctx.plugins.items.length})` : 'disabled'],
-    ['Plugin Items', formatPluginItems(ctx)],
-    ['Tools', ctx.tools.enabled ? `enabled (profile ${ctx.tools.profile})` : 'disabled'],
-    ['Tools Extra Config', formatList(Object.keys(ctx.tools.config).sort())],
-    ['Channel', ctx.channel.enabled ? `${ctx.channel.type}/${ctx.channel.accountId}` : 'disabled'],
-    ['Channel Server URL', ctx.channel.channelServerUrl || '-'],
-    ['Gateway URL', ctx.channel.enabled ? (ctx.channel.gatewayUrl ?? 'auto from dashboard-url') : '-'],
-    ['Gateway Token', formatGatewayToken(ctx)]
-  ]);
-  printBlock('运行项', [
-    ['Network Policy', ctx.networkPolicy.enabled ? `enabled (${ctx.networkPolicy.dir ?? '-'})` : 'disabled'],
-    ['Env', ctx.env.enabled ? `enabled (${ctx.env.targetFile})` : 'disabled'],
-    ['Env Variables', formatEnvVariables(ctx)],
-    ['Dependencies', enabledLabel(ctx.dependencies.enabled)],
-    ['Dependencies Workdir', ctx.dependencies.enabled ? ctx.dependencies.workingDir : '-'],
-    ['Dependencies Commands', ctx.dependencies.commands.join(' && ') || '-'],
-    ['Continue On Error', String(ctx.dependencies.continueOnError)]
-  ]);
-  printBlock('网关', [
-    ['Restart At End', formatGatewayRestartPlan(ctx)],
-    ['Restart Command', `nemoclaw ${ctx.sandboxName} gateway restart`]
+
+  for (const ctx of plan.agents) {
+    printBlock(`Agent: ${ctx.agentName}`, [
+      ['Workspace', ctx.workspace],
+      ['Model', ctx.model ?? 'preserve OpenClaw value'],
+      ['Agent Content', enabledLabel(ctx.agentContent.enabled)],
+      ['Agent Content Dir', ctx.agentContent.hostDir ?? '-'],
+      ['Conflict Strategy', ctx.agentContent.enabled ? ctx.agentContent.conflictStrategy : '-'],
+      ['Ignore', formatList(ctx.agentContent.ignore)],
+      ['Sandbox Uploads', formatFileCopies(ctx)],
+      ['Skills', ctx.skill.enabled ? `enabled (${ctx.skill.hostDir ?? '-'})` : 'disabled'],
+      [
+        'Env',
+        ctx.env.enabled
+          ? `enabled (${formatEnvTarget(ctx)})`
+          : 'disabled'
+      ],
+      ['Env Variables', formatEnvVariables(ctx)],
+      ['Sandbox Commands', enabledLabel(ctx.sandbox.commands.enabled)],
+      ['Commands Workdir', ctx.sandbox.commands.enabled ? ctx.sandbox.commands.workingDir : '-'],
+      ['Commands', formatDependencyCommands(ctx.sandbox.commands.items)],
+      [
+        'Channel Registration',
+        ctx.channelRegistration.enabled
+          ? `enabled (${agentRegistrationUrl(ctx.channelServer.url)}, continueOnError=${ctx.channelRegistration.continueOnError})`
+          : 'disabled'
+      ]
+    ]);
+  }
+
+  printBlock('Sandbox 共享配置', [
+    ['Plugins', shared.plugins.enabled ? `enabled (${shared.plugins.items.length})` : 'disabled'],
+    ['Plugin Items', formatPluginItems(shared)],
+    [
+      'OpenClaw Partial',
+      shared.openclawConfig.enabled ? `enabled (${shared.openclawConfig.file ?? '-'})` : 'disabled'
+    ],
+    ['ChannelServer', shared.channelServer.enabled ? `enabled (advbot/${shared.channelServer.advbotAccountId})` : 'disabled'],
+    ['ChannelServer URL', shared.channelServer.url || '-'],
+    ['Gateway URL', shared.channelServer.enabled ? (shared.channelServer.gatewayUrl ?? 'auto from dashboard-url') : '-'],
+    ['Gateway Token', formatGatewayToken(shared)],
+    ['Network Policy', shared.networkPolicy.enabled ? `enabled (${shared.networkPolicy.dir ?? '-'})` : 'disabled'],
+    ['Restart At End', shared.options.restartGateway ? 'enabled' : 'disabled']
   ]);
   logger.info('');
+}
+
+function printSummary(plan: DeployPlan, summary: DeploySummary): void {
+  const shared = plan.agents[0];
+  logger.info('');
+  logger.success('部署完成');
+  printBlock('目标', [
+    ['Sandbox', plan.sandboxName],
+    ['Agents', String(plan.agents.length)]
+  ]);
+  for (const agent of summary.agents) {
+    printBlock(`Agent: ${agent.name}`, [
+      ['Workspace', agent.workspace],
+      ['Model', agent.model ?? 'preserved'],
+      ['Agent Content', agent.agentContent],
+      ['Sandbox Uploads', `${agent.fileCopies.status}${agent.fileCopies.count ? ` (${agent.fileCopies.count})` : ''}`],
+      ['Skills', `${agent.skill.status}${agent.skill.count ? ` (${agent.skill.count})` : ''}`],
+      ['Env', formatEnvSummary(agent.env)],
+      ['Sandbox Commands', formatDependenciesSummary(agent.dependencies)],
+      ['Channel Registration', agent.channelRegistration]
+    ]);
+  }
+  printBlock('Sandbox 共享结果', [
+    ['Plugins', `${summary.plugins.status}${summary.plugins.status === 'configured' ? ` (installed ${summary.plugins.installed}, enabled ${summary.plugins.enabled})` : ''}`],
+    ['OpenClaw Config', summary.openclawConfig.status],
+    ['ChannelServer', formatChannelServerSummary(shared, summary)],
+    ['Network Policy', `${summary.networkPolicy.status}${summary.networkPolicy.count ? ` (${summary.networkPolicy.count})` : ''}`],
+    ['Gateway Restart', summary.gatewayRestart]
+  ]);
+  if (shared.channelServer.enabled) {
+    printBlock('ChannelServer', [
+      ['URL', shared.channelServer.url],
+      ['Gateway URL', shared.channelServer.gatewayUrl ?? '-'],
+      ['Gateway Token', maskSecret(shared.channelServer.gatewayToken)]
+    ]);
+  }
+  printBlock('验证', [['Doctor', `nemoclaw-deploy doctor --sandbox ${plan.sandboxName}`]]);
 }
 
 function formatPluginItems(ctx: DeployContext): string {
   if (!ctx.plugins.enabled || ctx.plugins.items.length === 0) return '-';
   return ctx.plugins.items
-    .map((item) => {
-      const source = item.source ?? 'already installed';
-      const markers = [item.force ? 'force' : '', item.channel ? 'channel config' : '']
-        .filter(Boolean)
-        .join(', ');
-      return `${item.id} <- ${source}${markers ? ` (${markers})` : ''}`;
-    })
+    .map((item) => `${item.id} <- ${item.source ?? 'already installed'}${item.force ? ' (force)' : ''}`)
     .join(', ');
-}
-
-function printSummary(ctx: DeployContext, summary: DeploySummary): void {
-  logger.info('');
-  logger.success('部署完成');
-  printBlock('目标', [
-    ['Sandbox', ctx.sandboxName],
-    ['Agent', ctx.agentName],
-    ['Workspace', ctx.workspace]
-  ]);
-  printBlock('结果', [
-    ['Agent Content', summary.agentContent],
-    ['Skills', `${summary.skill.status}${summary.skill.status === 'installed' ? ` (${summary.skill.count})` : ''}`],
-    [
-      'Plugins',
-      `${summary.plugins.status}${
-        summary.plugins.status === 'configured'
-          ? ` (installed ${summary.plugins.installed}, enabled ${summary.plugins.enabled})`
-          : ''
-      }`
-    ],
-    [
-      'Tools',
-      `${summary.tools.status}${summary.tools.status === 'configured' ? ` (profile ${summary.tools.profile})` : ''}`
-    ],
-    ['Channel', formatChannelSummary(ctx, summary)],
-    [
-      'Network Policy',
-      `${summary.networkPolicy.status}${
-        summary.networkPolicy.status === 'applied' ? ` (${summary.networkPolicy.count})` : ''
-      }`
-    ],
-    [
-      'Env',
-      `${summary.env.status}${
-        summary.env.status === 'configured' ? ` (${summary.env.count} keys -> ${summary.env.targetFile})` : ''
-      }`
-    ],
-    [
-      'Dependencies',
-      `${summary.dependencies.status}${
-        summary.dependencies.status !== 'skipped' ? ` (${summary.dependencies.count})` : ''
-      }`
-    ],
-    ['Gateway Restart', summary.gatewayRestart]
-  ]);
-  if (ctx.channel.enabled) {
-    printBlock('Channel', [
-      ['Channel Server URL', ctx.channel.channelServerUrl],
-      ['Gateway URL', ctx.channel.gatewayUrl ?? '-'],
-      ['Gateway Token', maskSecret(ctx.channel.gatewayToken)]
-    ]);
-  }
-  printBlock('验证', [['Doctor', `nemoclaw-deploy doctor --sandbox ${ctx.sandboxName}`]]);
 }
 
 function printBlock(title: string, rows: Array<[string, string]>): void {
   logger.info('');
   logger.step(title);
   const width = Math.max(...rows.map(([label]) => label.length), 0) + 2;
-  for (const [label, value] of rows) {
-    logger.info(`  ${label.padEnd(width)}${value || '-'}`);
-  }
+  for (const [label, value] of rows) logger.info(`  ${label.padEnd(width)}${value || '-'}`);
 }
 
 function enabledLabel(value: boolean): string {
@@ -293,9 +311,28 @@ function formatList(values: string[]): string {
   return values.length > 0 ? values.join(', ') : '-';
 }
 
+function formatDependencyCommands(commands: string[]): string {
+  const text = commands.map((command) => command.replace(/\s+/g, ' ').trim()).filter(Boolean).join(' && ');
+  if (!text) return '-';
+  if (text.length <= 240) return text;
+  return `${text.slice(0, 237)}...`;
+}
+
+function formatFileCopies(ctx: DeployContext): string {
+  if (!ctx.sandbox.uploads.enabled) return 'disabled';
+  return ctx.sandbox.uploads.items
+    .map(
+      (item) =>
+        `${item.source} -> ${item.destination}${item.overwrite ? ' (merge/overwrite)' : ' (fail on conflict)'}`
+    )
+    .join(', ');
+}
+
 function formatGatewayToken(ctx: DeployContext): string {
-  if (!ctx.channel.enabled) return '-';
-  return ctx.channel.gatewayToken ? maskSecret(ctx.channel.gatewayToken) : 'auto from gateway-token';
+  if (!ctx.channelServer.enabled) return '-';
+  return ctx.channelServer.gatewayToken
+    ? maskSecret(ctx.channelServer.gatewayToken)
+    : 'auto from gateway-token';
 }
 
 function formatEnvVariables(ctx: DeployContext): string {
@@ -307,39 +344,75 @@ function formatEnvVariables(ctx: DeployContext): string {
   );
 }
 
-function formatGatewayRestartPlan(ctx: DeployContext): string {
-  if (ctx.options.restartGateway) return 'enabled';
-  return 'disabled';
+function formatEnvTarget(ctx: DeployContext): string {
+  const directory = ctx.env.directory.replace(/\/+$/, '');
+  return `${directory || '/'}/${ctx.env.targetFile}`.replace(/^\/\//, '/');
 }
 
-function formatChannelSummary(ctx: DeployContext, summary: DeploySummary): string {
-  if (summary.channel.status === 'configured') return `${ctx.channel.type}/${ctx.channel.accountId} configured`;
-  if (summary.channel.reason === 'existing') return 'skipped (existing)';
-  return summary.channel.status;
+function formatEnvSummary(result: AgentDeploySummary['env']): string {
+  return result.status === 'configured'
+    ? `${result.status} (${result.count} keys -> ${result.targetFile})`
+    : result.status;
+}
+
+function formatDependenciesSummary(result: AgentDeploySummary['dependencies']): string {
+  return result.status === 'skipped' ? result.status : `${result.status} (${result.count})`;
+}
+
+function formatChannelServerSummary(ctx: DeployContext, summary: DeploySummary): string {
+  if (summary.channelServer.status === 'configured') {
+    return `advbot/${ctx.channelServer.advbotAccountId} configured`;
+  }
+  if (summary.channelServer.reason === 'existing') return 'skipped (existing)';
+  return summary.channelServer.status;
+}
+
+function copyResolvedChannelServer(contexts: DeployContext[], source: DeployContext): void {
+  for (const ctx of contexts) {
+    ctx.channelServer.gatewayToken = source.channelServer.gatewayToken;
+    ctx.channelServer.gatewayUrl = source.channelServer.gatewayUrl;
+  }
+}
+
+function assertResolvedWorkspaces(contexts: DeployContext[]): void {
+  const owners = new Map<string, string>();
+  for (const ctx of contexts) {
+    const existing = owners.get(ctx.workspace);
+    if (existing) {
+      throw new Error(
+        `OpenClaw 中的实际 workspace 冲突: agent ${existing} 和 ${ctx.agentName} 都使用 ${ctx.workspace}`
+      );
+    }
+    owners.set(ctx.workspace, ctx.agentName);
+  }
 }
 
 async function validateRuntimeResources(ctx: DeployContext): Promise<void> {
   if (ctx.agentContent.enabled && ctx.agentContent.hostDir) {
     ctx.agentContent.hostDir = await validateAgentContentDir(ctx.agentContent.hostDir);
   }
+  if (ctx.sandbox.uploads.enabled) {
+    for (const item of ctx.sandbox.uploads.items) {
+      item.source = await validateHostFileOrDirectory(item.source);
+    }
+  }
+  if (ctx.openclawConfig.enabled && ctx.openclawConfig.file) {
+    ctx.openclawConfig.file = await validateOpenClawPartialFile(ctx.openclawConfig.file);
+  }
+}
 
+async function cleanupAllRemoteTemp(contexts: DeployContext[]): Promise<void> {
+  for (const ctx of contexts) await cleanupRemoteTemp(ctx);
 }
 
 async function cleanupRemoteTemp(ctx: DeployContext): Promise<void> {
   try {
-    await runCommand('nemoclaw', [
-      ctx.sandboxName,
-      'exec',
-      '--',
-      'rm',
-      '-rf',
-      `/tmp/nemoclaw-deploy/${ctx.agentName}`
-    ], {
-      timeoutMs: 10_000,
-      description: '清理 sandbox 内 nemoclaw-deploy 临时目录'
-    });
+    await runCommand(
+      'nemoclaw',
+      [ctx.sandboxName, 'exec', '--', 'rm', '-rf', `/tmp/nemoclaw-deploy/${ctx.agentName}`],
+      { timeoutMs: 10_000, description: `清理 agent ${ctx.agentName} 的 sandbox 临时目录` }
+    );
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    logger.warn(`临时文件清理未完成：${detail}`);
+    logger.warn(`临时文件清理未完成：${error instanceof Error ? error.message : String(error)}`);
   }
 }

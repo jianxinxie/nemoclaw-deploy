@@ -57,6 +57,7 @@ export async function configureEnv(ctx: DeployContext): Promise<ConfigureEnvResu
         '--',
         'env',
         `WORKSPACE=${ctx.workspace}`,
+        `TARGET_DIR=${ctx.env.directory}`,
         `TARGET_FILE=${ctx.env.targetFile}`,
         `ENV_DATA_FILE=${remoteDataFile}`,
         'node',
@@ -65,13 +66,21 @@ export async function configureEnv(ctx: DeployContext): Promise<ConfigureEnvResu
       {
         dryRun: ctx.options.dryRun,
         sensitive: true,
-        description: `合并 env 变量到 workspace/${ctx.env.targetFile}`
+        description: `合并 env 变量到 ${path.posix.join(ctx.env.directory, ctx.env.targetFile)}`
       }
     );
 
     logger.info(`已写入 ${entries.length} 个 env key: ${entries.join(', ')}`);
-    logger.info('OpenClaw 会从 workspace .env 加载普通项目变量，skill 可直接使用 $PYTHON。');
-    return { status: 'configured', targetFile: ctx.env.targetFile, count: entries.length };
+    if (ctx.env.directory === ctx.workspace && ctx.env.targetFile === '.env') {
+      logger.info('OpenClaw 会从 workspace .env 加载普通项目变量，skill 可直接使用 $PYTHON。');
+    } else {
+      logger.info(`env 文件已写入自定义位置：${path.posix.join(ctx.env.directory, ctx.env.targetFile)}`);
+    }
+    return {
+      status: 'configured',
+      targetFile: path.posix.join(ctx.env.directory, ctx.env.targetFile),
+      count: entries.length
+    };
   } finally {
     await fs.remove(tempDir);
   }
@@ -91,21 +100,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const workspace = process.env.WORKSPACE;
+const targetDir = process.env.TARGET_DIR || workspace;
 const targetFile = process.env.TARGET_FILE || '.env';
 const dataFile = process.env.ENV_DATA_FILE;
 
 if (!workspace) throw new Error('WORKSPACE is required');
+if (!targetDir) throw new Error('TARGET_DIR is required');
 if (!dataFile) throw new Error('ENV_DATA_FILE is required');
 if (path.isAbsolute(targetFile)) throw new Error('TARGET_FILE must be relative');
 
 const normalizedTarget = path.posix.normalize(targetFile.replace(/\\\\/g, '/'));
 if (!normalizedTarget || normalizedTarget === '.' || normalizedTarget === '..' || normalizedTarget.startsWith('../')) {
-  throw new Error('TARGET_FILE must stay inside WORKSPACE');
+  throw new Error('TARGET_FILE must stay inside TARGET_DIR');
 }
 
 const data = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
 const variables = data.variables || {};
-const targetPath = path.join(workspace, normalizedTarget);
+const targetPath = path.join(targetDir, normalizedTarget);
 
 function assertEnvName(name) {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
