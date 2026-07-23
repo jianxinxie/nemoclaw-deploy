@@ -1,7 +1,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'fs-extra';
-import { confirm, password } from '@inquirer/prompts';
+import { confirm } from '@inquirer/prompts';
 import {
   collectOnboardContext,
   type BootstrapCliOptions,
@@ -79,7 +79,6 @@ export async function bootstrapCommand(options: BootstrapCliOptions): Promise<Bo
 
   if (shouldInstall) {
     // 官方安装器会立即进入首次 onboard，必须在产生安装副作用前验证非交互配置。
-    await promptForInferenceCredential(ctx);
     assertNonInteractiveOnboardConfig(ctx);
     logger.step('安装 NemoClaw；官方安装器会在首次安装后自动进入 onboard...');
     await runCommand('bash', ['-o', 'pipefail', '-c', INSTALL_COMMAND], {
@@ -121,7 +120,6 @@ export async function bootstrapCommand(options: BootstrapCliOptions): Promise<Bo
   }
 
   assertNonInteractiveOnboardConfig(ctx);
-  await promptForInferenceCredential(ctx);
   logger.step(`执行 NemoClaw onboard（${ctx.onboard.mode}）...`);
   await runCommand(nemoclaw, buildOnboardArgs(ctx), {
     interactive: !ctx.options.nonInteractive,
@@ -184,7 +182,7 @@ function printPlan(
     ['Web Search', ctx.onboard.openclaw.webSearchProvider],
     ['Tool Disclosure', ctx.onboard.openclaw.toolDisclosure],
     ['Interaction', ctx.options.nonInteractive ? 'non-interactive' : 'official interactive wizard'],
-    ['Credentials', '从 onboard.yaml apiKey.value 或官方安全提示读取']
+    ['Credentials', '模型 API key 仅从 onboard.yaml inference.apiKey 读取']
   ]);
   logger.info('');
 }
@@ -352,66 +350,20 @@ function envHint(name: string): string {
 
 function credentialDisplay(ctx: OnboardContext): string {
   const targetEnv = resolveCredentialTargetEnv(ctx);
-  if (ctx.onboard.inference.apiKey.promptInInteractive && !ctx.options.nonInteractive) {
-    return targetEnv
-      ? `${targetEnv} <- secure prompt if onboard is required`
-      : 'secure prompt after provider is configured, otherwise official prompt';
+  if (ctx.onboard.inference.apiKey && targetEnv) {
+    return `${targetEnv} <- onboard.yaml inference.apiKey`;
   }
-  const directValue = ctx.onboard.inference.apiKey.value;
-  const sourceEnv = ctx.onboard.inference.apiKey.fromEnv;
-  if (directValue && targetEnv) return `${targetEnv} <- onboard.yaml apiKey.value`;
-  if (directValue) return 'from onboard.yaml apiKey.value';
-  if (sourceEnv && targetEnv) return `${targetEnv} <- $${sourceEnv}`;
-  if (sourceEnv) return `from $${sourceEnv}`;
-  if (targetEnv && process.env[targetEnv]) return `from $${targetEnv}`;
-  return targetEnv ? `${targetEnv} from current env or official prompt` : 'current env or official prompt';
-}
-
-async function promptForInferenceCredential(ctx: OnboardContext): Promise<void> {
-  const apiKey = ctx.onboard.inference.apiKey;
-  if (!apiKey.promptInInteractive || apiKey.prompted || ctx.options.nonInteractive) return;
-
-  const targetEnv = resolveCredentialTargetEnv(ctx);
-  if (!targetEnv) {
-    logger.info('未能在执行前确定 credential 环境变量，将由 NemoClaw 官方向导安全读取 API key。');
-    return;
-  }
-
-  const value = await password({
-    message: `请输入新的模型服务 API key（用于 ${targetEnv}，输入不会显示）：`,
-    mask: '*',
-    validate: (input) => {
-      const trimmed = input.trim();
-      if (!trimmed) return 'API key 不能为空';
-      if (/[\0\r\n]/.test(trimmed)) return 'API key 不能包含空字符或换行';
-      return true;
-    }
-  });
-
-  apiKey.value = value.trim();
-  apiKey.fromEnv = undefined;
-  apiKey.prompted = true;
-  logger.success(`已安全读取 ${targetEnv}，仅用于本次 onboard，不会写回配置文件。`);
+  if (ctx.onboard.inference.apiKey) return 'configured in onboard.yaml inference.apiKey';
+  return 'not configured in onboard.yaml';
 }
 
 function injectInferenceCredential(env: Record<string, string>, ctx: OnboardContext): void {
-  const directValue = ctx.onboard.inference.apiKey.value;
-  const sourceEnv = ctx.onboard.inference.apiKey.fromEnv;
   const targetEnv = resolveCredentialTargetEnv(ctx);
-  if (!targetEnv) return;
-  if (directValue) {
-    env[targetEnv] = directValue;
-    return;
-  }
-  if (!sourceEnv) return;
-  const value = process.env[sourceEnv];
-  if (value) env[targetEnv] = value;
+  const apiKey = ctx.onboard.inference.apiKey;
+  if (targetEnv && apiKey) env[targetEnv] = apiKey;
 }
 
 function resolveCredentialTargetEnv(ctx: OnboardContext): string | undefined {
-  const explicit = ctx.onboard.inference.apiKey.targetEnv;
-  if (explicit) return explicit;
-
   const provider = normalizeProviderKey(ctx.onboard.inference.provider);
   switch (provider) {
     case 'build':
@@ -453,19 +405,13 @@ function assertNonInteractiveOnboardConfig(ctx: OnboardContext): void {
   if ((provider === 'custom' || provider === 'anthropiccompatible') && !ctx.onboard.inference.endpointUrl && !process.env.NEMOCLAW_ENDPOINT_URL) {
     throw new Error('非交互 compatible endpoint 必须设置 onboard.inference.endpointUrl 或导出 NEMOCLAW_ENDPOINT_URL');
   }
-  const sourceEnv = ctx.onboard.inference.apiKey.fromEnv;
-  if (sourceEnv && !process.env[sourceEnv]) {
-    throw new Error(`onboard.inference.apiKey.fromEnv 指向的环境变量不存在或为空: ${sourceEnv}`);
-  }
   const targetEnv = resolveCredentialTargetEnv(ctx);
-  const hasDirectValue = Boolean(ctx.onboard.inference.apiKey.value);
   if (
     (provider === 'custom' || provider === 'anthropiccompatible') &&
     targetEnv &&
-    !hasDirectValue &&
-    !process.env[sourceEnv ?? targetEnv]
+    !ctx.onboard.inference.apiKey
   ) {
-    throw new Error(`非交互 compatible endpoint 必须设置 onboard.inference.apiKey.value`);
+    throw new Error(`非交互 compatible endpoint 必须设置 onboard.inference.apiKey`);
   }
 }
 

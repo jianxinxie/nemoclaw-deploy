@@ -72,18 +72,16 @@ onboard:
 
 `onboard.inference.model` 是创建或重建 sandbox 时使用的默认模型。`deploy.agents[].model` 留空时保留 OpenClaw 当前值；填写后仅覆盖对应 agent。已有 sandbox 在 `ensure` 模式下会跳过 onboard，因此需要修改已有 agent 模型时应填写 agent 的 `model`。
 
-模型 API key 建议使用交互覆盖，避免把真实凭据长期保存在 YAML 中：
+模型 API key 直接从 `onboard.yaml` 读取：
 
 ```yaml
 onboard:
   inference:
     provider: custom
-    apiKey:
-      promptInInteractive: true
-      value: ""
+    apiKey: "your-api-key"
 ```
 
-只有实际需要安装/onboard 时才会隐藏提示输入；输入值仅用于本次进程，不会显示或写回配置。非交互部署应将其设为 `false`，并使用 `fromEnv` 或 `value`。
+CLI 不会再为模型 API key 弹出输入框。该值只会在执行安装/onboard 时注入 provider 对应的 credential 环境变量，命令计划和日志不会显示明文。请使用仅保存在本机且不提交到版本库的配置文件。
 
 ## 自定义 sandbox Dockerfile
 
@@ -182,8 +180,8 @@ FORCE_CLI_INSTALL=1 ./install-and-up.sh
 
 ## 安全提示
 
-- 不要把真实 API key、token 或 password 提交到仓库。
-- secret 优先通过环境变量、NemoClaw 官方安全提示或运行平台注入。
+- `onboard.inference.apiKey` 可以保存模型凭据，但包含真实值的配置文件不要提交到仓库。
+- gateway token 等其他 secret 仍优先通过环境变量、NemoClaw 官方安全提示或运行平台注入。
 - `agentContent.conflictStrategy: ask` 在非交互模式下按 `fail` 处理。
 - `--dry-run` 不执行安装、onboard、上传或 sandbox 命令。
 

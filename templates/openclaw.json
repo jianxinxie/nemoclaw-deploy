@@ -53,7 +53,7 @@
       "example-local-mcp": {
         "command": "python3",
         "args": [
-          "/sandbox/.openclaw/workspace-python-agent/mcp-servers/example/server.py"
+          "/sandbox/.openclaw/workspace/python-agent/mcp-servers/example/server.py"
         ]
       }
     }

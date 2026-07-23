@@ -34,13 +34,7 @@ export interface OnboardContext {
       model?: string;
       endpointUrl?: string;
       preferredApi?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
-      apiKey: {
-        promptInInteractive: boolean;
-        prompted: boolean;
-        value?: string;
-        fromEnv?: string;
-        targetEnv?: string;
-      };
+      apiKey?: string;
     };
     gpu: {
       host: TriState;
@@ -114,14 +108,7 @@ const onboardConfigSchema = z.object({
           model: z.string().optional().nullable(),
           endpointUrl: z.string().optional().nullable(),
           preferredApi: optionalPreferredApi,
-          apiKey: z
-            .object({
-              promptInInteractive: z.boolean().optional(),
-              value: z.string().optional().nullable(),
-              fromEnv: z.string().optional().nullable(),
-              targetEnv: z.string().optional().nullable()
-            })
-            .optional()
+          apiKey: z.string().optional().nullable()
         })
         .optional(),
       gpu: z
@@ -255,22 +242,10 @@ export async function collectOnboardContext(options: BootstrapCliOptions): Promi
           normalize(config.onboard?.inference?.endpointUrl)
         ),
         preferredApi: config.onboard?.inference?.preferredApi ?? undefined,
-        apiKey: {
-          promptInInteractive: config.onboard?.inference?.apiKey?.promptInInteractive ?? false,
-          prompted: false,
-          value: validateOptionalSecretValue(
-            'onboard.inference.apiKey.value',
-            normalize(config.onboard?.inference?.apiKey?.value)
-          ),
-          fromEnv: validateOptionalEnvName(
-            'onboard.inference.apiKey.fromEnv',
-            normalize(config.onboard?.inference?.apiKey?.fromEnv)
-          ),
-          targetEnv: validateOptionalEnvName(
-            'onboard.inference.apiKey.targetEnv',
-            normalize(config.onboard?.inference?.apiKey?.targetEnv)
-          )
-        }
+        apiKey: validateOptionalSecretValue(
+          'onboard.inference.apiKey',
+          normalize(config.onboard?.inference?.apiKey)
+        )
       },
       gpu: {
         host: config.onboard?.gpu?.host ?? 'auto',
@@ -395,14 +370,6 @@ function validateOptionalSimpleValue(label: string, value?: string): string | un
   if (!value) return undefined;
   if (value.startsWith('-') || /[\0\r\n]/.test(value)) {
     throw new Error(`${label} 不能以 - 开头或包含控制字符`);
-  }
-  return value;
-}
-
-function validateOptionalEnvName(label: string, value?: string): string | undefined {
-  if (!value) return undefined;
-  if (!/^[A-Z_][A-Z0-9_]*$/.test(value)) {
-    throw new Error(`${label} 必须是合法环境变量名，例如 COMPATIBLE_API_KEY`);
   }
   return value;
 }

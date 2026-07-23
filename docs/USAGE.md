@@ -118,9 +118,9 @@ deploy:
 
 `model: ""` 表示保留 OpenClaw 当前设置。
 
-### 安全修改模型 API key
+### 配置模型 API key
 
-对于 `custom` 等需要模型凭据的 provider，建议启用交互覆盖：
+对于 `custom` 等需要模型凭据的 provider，直接在 YAML 中配置：
 
 ```yaml
 onboard:
@@ -128,22 +128,10 @@ onboard:
     provider: custom
     model: qwen3.6-35B
     endpointUrl: https://ai.example.com/v1
-    apiKey:
-      promptInInteractive: true
-      value: ""
+    apiKey: "your-api-key"
 ```
 
-当本次操作确实需要安装或 onboard 时，CLI 会在启动 NemoClaw 前隐藏输入 API key，并注入到 provider 对应的 credential 环境变量。输入值只保存在当前进程内存中，不会打印或写回 `onboard.yaml`。如果 NemoClaw 验证失败，可退出官方向导后重新执行命令，再输入新的 key。
-
-`--non-interactive` 会忽略 `promptInInteractive`，此时必须使用 `apiKey.value`、`apiKey.fromEnv` 或 provider 对应的当前进程环境变量。自动化环境推荐：
-
-```yaml
-apiKey:
-  promptInInteractive: false
-  fromEnv: MODEL_API_KEY
-```
-
-然后在运行前设置 `MODEL_API_KEY`。对于 `provider: custom`，CLI 会把它安全映射到 NemoClaw 使用的 `COMPATIBLE_API_KEY`。
+CLI 只读取 `onboard.inference.apiKey`，不会额外弹出 API key 输入框，也不会把该值输出到计划或日志。对于 `provider: custom`，CLI 会将其映射到 NemoClaw 使用的 `COMPATIBLE_API_KEY`；`anthropicCompatible` 会映射到 `COMPATIBLE_ANTHROPIC_API_KEY`。包含真实 key 的 YAML 应仅保存在本机，不要提交到版本库。
 
 ## Onboard policy presets
 
@@ -192,6 +180,7 @@ deploy:
 
       channelRegistration:
         enabled: false
+        agentLabel: ""
         continueOnError: true
 
       env:
@@ -202,7 +191,7 @@ deploy:
           APP_ENV: production
 ```
 
-`workspace: ""` 默认使用 `/sandbox/.openclaw/workspace-${agentName}`。如果 agent 已存在，CLI 会读取 OpenClaw 中的实际 workspace，并将后续上传、env 和命令操作切换到该路径。
+`workspace: ""` 默认使用 `/sandbox/.openclaw/workspace/${agentName}`。如果 agent 已存在，CLI 会读取 OpenClaw 中的实际 workspace，并将后续上传、env 和命令操作切换到该路径。
 
 `env.directory` 规则：
 
@@ -307,6 +296,8 @@ deploy:
     - name: my-agent
       channelRegistration:
         enabled: true
+        # 留空时默认使用 onboard.sandbox.name
+        agentLabel: ""
         continueOnError: true
 ```
 
@@ -316,10 +307,10 @@ deploy:
 POST <channelServer.url>/v1/openclaw/agents
 Content-Type: application/json
 
-{"agent_id":"my-agent"}
+{"agent_id":"my-agent","agent_label":"demo"}
 ```
 
-`continueOnError` 默认为 `true`：注册请求失败时记录 `failed-continued` 并完成部署。设为 `false` 时，curl 预检查或注册请求失败会立即终止部署。
+`agentLabel` 留空时默认使用 `onboard.sandbox.name`。`continueOnError` 默认为 `true`：注册请求失败时记录 `failed-continued` 并完成部署。设为 `false` 时，curl 预检查或注册请求失败会立即终止部署。
 
 ChannelServer 集成还会自动获取 gateway token 和 gateway URL，只补充 `channels.advbot.accounts.<advbotAccountId>` 的动态连接字段。
 
@@ -336,6 +327,6 @@ ChannelServer 集成还会自动获取 gateway token 和 gateway URL，只补充
 
 ## 安全提示
 
-- 不要把真实 API key、token 或 password 提交到 YAML 或 partial JSON。
+- `onboard.inference.apiKey` 可以保存模型凭据，但包含真实值的 YAML 不要提交到版本库；partial JSON 仍禁止包含凭据。
 - `--dry-run` 不执行真实安装、上传、命令或外部请求。
 - 所有外部命令均经过统一执行器并进行敏感参数脱敏。

@@ -229,7 +229,7 @@ function printPlan(plan: DeployPlan): void {
       [
         'Channel Registration',
         ctx.channelRegistration.enabled
-          ? `enabled (${agentRegistrationUrl(ctx.channelServer.url)}, continueOnError=${ctx.channelRegistration.continueOnError})`
+          ? `enabled (${agentRegistrationUrl(ctx.channelServer.url)}, agentLabel=${ctx.channelRegistration.agentLabel}, continueOnError=${ctx.channelRegistration.continueOnError})`
           : 'disabled'
       ]
     ]);

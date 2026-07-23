@@ -73,6 +73,7 @@ export interface DeployContext {
 
   channelRegistration: {
     enabled: boolean;
+    agentLabel: string;
     continueOnError: boolean;
   };
 
@@ -155,6 +156,7 @@ const sandboxCommandsSchema = z.object({
 
 const channelRegistrationSchema = z.object({
   enabled: z.boolean().optional(),
+  agentLabel: z.string().optional(),
   continueOnError: z.boolean().optional()
 }).strict().optional();
 
@@ -329,7 +331,7 @@ async function collectOneDeployContext(
     })
   );
 
-  const defaultWorkspace = `/sandbox/.openclaw/workspace-${agentName}`;
+  const defaultWorkspace = `/sandbox/.openclaw/workspace/${agentName}`;
   const configuredWorkspace = normalizeOptionalString(config.workspace);
   const workspace =
     configuredWorkspace ??
@@ -467,6 +469,8 @@ async function collectOneDeployContext(
   }
   const channelRegistrationContinueOnError =
     config.channelRegistration?.continueOnError ?? true;
+  const channelRegistrationAgentLabel =
+    normalizeOptionalString(config.channelRegistration?.agentLabel) ?? sandboxName;
 
   const networkPolicyEnabled = await readOptionalBoolean({
     current: config.networkPolicy?.enabled,
@@ -566,6 +570,7 @@ async function collectOneDeployContext(
     },
     channelRegistration: {
       enabled: channelRegistrationEnabled,
+      agentLabel: channelRegistrationAgentLabel,
       continueOnError: channelRegistrationContinueOnError
     },
     plugins: {

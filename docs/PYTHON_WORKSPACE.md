@@ -7,13 +7,13 @@
 每个 agent 有自己的 workspace。Python 依赖统一安装到该 workspace 下的 `.venv`：
 
 ```text
-/sandbox/.openclaw/workspace-<agent>/.venv
+/sandbox/.openclaw/workspace/<agent>/.venv
 ```
 
 部署时 CLI 会写入 workspace `.env`：
 
 ```bash
-WORKSPACE=/sandbox/.openclaw/workspace-<agent>
+WORKSPACE=/sandbox/.openclaw/workspace/<agent>
 VIRTUAL_ENV=$WORKSPACE/.venv
 PYTHON=$WORKSPACE/.venv/bin/python
 ```
@@ -78,7 +78,7 @@ $WORKSPACE/.venv
 所以 `.venv` 总是在 workspace 根目录：
 
 ```text
-/sandbox/.openclaw/workspace-<agent>/.venv
+/sandbox/.openclaw/workspace/<agent>/.venv
 ```
 
 即使以后把 `sandbox.commands.workingDir` 改成 `app`，`.venv` 仍然会在 workspace 根目录，而不是 `app/.venv`。
@@ -145,7 +145,7 @@ $WORKSPACE/.venv
 不要在 skill 中写：
 
 ```bash
-/sandbox/.openclaw/workspace-python-agent/.venv/bin/python demo.py
+/sandbox/.openclaw/workspace/python-agent/.venv/bin/python demo.py
 ```
 
 这种写法会和 agent 名、workspace 路径绑定，不适合复用。
@@ -194,7 +194,7 @@ skill 中再调用：
 可以手动执行：
 
 ```bash
-cd /sandbox/.openclaw/workspace-<agent>
+cd /sandbox/.openclaw/workspace/<agent>
 set -a
 . ./.env
 set +a
@@ -234,8 +234,8 @@ $WORKSPACE/requirements.txt
 不会。每个 agent 使用自己的 workspace：
 
 ```text
-/sandbox/.openclaw/workspace-agent-a/.venv
-/sandbox/.openclaw/workspace-agent-b/.venv
+/sandbox/.openclaw/workspace/agent-a/.venv
+/sandbox/.openclaw/workspace/agent-b/.venv
 ```
 
 `.env`、`.venv`、`requirements.txt` 都是 workspace 级别的。

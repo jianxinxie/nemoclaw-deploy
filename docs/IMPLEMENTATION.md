@@ -32,7 +32,7 @@
 
    安装版本由 `onboard.yaml` 中的 `install.version` 固定，CLI 会通过 `NEMOCLAW_INSTALL_TAG` 传给官方安装器。若本机已有 `nemoclaw` 且语义版本低于配置版本，交互模式会询问是否更新，拒绝后继续后续流程；相同或更高版本不会触发安装。非交互模式自动更新旧版本，`reinstall` 模式始终显式重装。
    `onboard.services.openShellGatewayPort` 会映射为 `NEMOCLAW_GATEWAY_PORT`，用于固定 OpenShell gateway 端口；不配置时使用 NemoClaw 默认端口。CLI 会拒绝 dashboard 自动分配范围 `18789-18799`、默认推理/代理端口 `8000`、`11434`、`11435`，也会拒绝和其他已配置服务端口重复。
-   `onboard.inference.endpointUrl` 会映射为 `NEMOCLAW_ENDPOINT_URL`。`onboard.inference.apiKey.value` 会在运行时临时注入到 NemoClaw 期望的 credential env，例如 `custom` -> `COMPATIBLE_API_KEY`，`anthropicCompatible` -> `COMPATIBLE_ANTHROPIC_API_KEY`；日志会脱敏，不会打印真实 key。
+   `onboard.inference.endpointUrl` 会映射为 `NEMOCLAW_ENDPOINT_URL`。`onboard.inference.apiKey` 只从 YAML 读取，并在运行时注入到 NemoClaw 期望的 credential env，例如 `custom` -> `COMPATIBLE_API_KEY`，`anthropicCompatible` -> `COMPATIBLE_ANTHROPIC_API_KEY`；CLI 不会额外提示输入，日志会脱敏且不会打印真实 key。
 
 3. 按 `onboard.mode` 处理 sandbox：
    - `ensure`：sandbox 可用就跳过。

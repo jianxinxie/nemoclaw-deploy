@@ -1,6 +1,6 @@
 {
   "name": "@advantech-axa/nemoclaw-deploy",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Install and onboard NemoClaw, then safely deploy one or more OpenClaw agents.",
   "type": "module",
   "bin": {

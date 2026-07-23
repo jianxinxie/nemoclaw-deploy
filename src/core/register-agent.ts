@@ -39,7 +39,10 @@ export async function registerAgent(ctx: DeployContext): Promise<RegisterAgentRe
     }
 
     const url = agentRegistrationUrl(ctx.channelServer.url);
-    const body = JSON.stringify({ agent_id: ctx.agentName });
+    const body = JSON.stringify({
+      agent_id: ctx.agentName,
+      agent_label: ctx.channelRegistration.agentLabel
+    });
 
     await runCommand(
       'curl',

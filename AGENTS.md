@@ -282,7 +282,7 @@ options:
 3. `workspace` 为空时，默认使用：
 
 ```text
-/sandbox/.openclaw/workspace-${agentName}
+/sandbox/.openclaw/workspace/${agentName}
 ```
 
 4. `agentContent.enabled=true` 表示上传 agent 初始化内容。
@@ -304,7 +304,7 @@ options:
 ```text
 请输入 sandbox 名称：
 请输入 agent 名称：
-请输入 workspace，默认 /sandbox/.openclaw/workspace-${agentName}：
+请输入 workspace，默认 /sandbox/.openclaw/workspace/${agentName}：
 
 是否上传 agent 初始化内容？Y/n
 请输入 agent-content 主机目录：
@@ -375,7 +375,7 @@ export interface DeployContext {
 默认值：
 
 ```text
-workspace = /sandbox/.openclaw/workspace-${agentName}
+workspace = /sandbox/.openclaw/workspace/${agentName}
 agentContent.enabled = true
 agentContent.conflictStrategy = interactive ? ask : fail
 skill.enabled = true
@@ -965,7 +965,7 @@ SKILL.md
 
 Sandbox: demo
 Agent: my-agent
-Workspace: /sandbox/.openclaw/workspace-my-agent
+Workspace: /sandbox/.openclaw/workspace/my-agent
 
 Agent Content: enabled
 Agent Content Dir: ./agent-content
@@ -1004,7 +1004,7 @@ Restart / Recover: enabled
 
 Sandbox: demo
 Agent: my-agent
-Workspace: /sandbox/.openclaw/workspace-my-agent
+Workspace: /sandbox/.openclaw/workspace/my-agent
 
 Agent Content: applied
 Skill: installed
