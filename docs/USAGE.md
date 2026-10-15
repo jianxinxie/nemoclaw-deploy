@@ -280,7 +280,7 @@ deploy:
   → deploy.agents[].model
 ```
 
-partial 中适合配置 `models`、`channels`、`mcp`、`session`、`tools`、`cron` 和 `env`。不允许包含 `agents`、token、secret、password、API key、Authorization、Bearer 或 JWT。省略的现有字段会保留，配置验证失败时会自动回滚。
+partial 中适合配置 `models`、`channels`、`mcp`、`session`、`tools`、`cron` 和 `env`。不允许包含 `agents`；其他 OpenClaw 业务字段（包括 channel 的 `secret`）会直接合并，CLI 不额外拦截。省略的现有字段会保留，配置验证失败时会自动回滚。包含真实凭据的 partial 不要提交到版本库，并应限制本地文件权限。
 
 ## ChannelServer 和 agent 注册
 
@@ -327,6 +327,6 @@ ChannelServer 集成还会自动获取 gateway token 和 gateway URL，只补充
 
 ## 安全提示
 
-- `onboard.inference.apiKey` 可以保存模型凭据，但包含真实值的 YAML 不要提交到版本库；partial JSON 仍禁止包含凭据。
+- `onboard.inference.apiKey` 和 partial JSON 可以保存业务所需凭据，但包含真实值的配置文件不要提交到版本库。
 - `--dry-run` 不执行真实安装、上传、命令或外部请求。
 - 所有外部命令均经过统一执行器并进行敏感参数脱敏。

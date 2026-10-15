@@ -8,7 +8,7 @@ export async function createAgent(ctx: DeployContext): Promise<void> {
     [ctx.sandboxName, 'agents', 'list', '--json'],
     {
       dryRun: ctx.options.dryRun,
-      timeoutMs: 30_000,
+      timeoutMs: 60_000,
       description: '创建前读取 agent 列表，已存在则跳过创建'
     }
   );
@@ -42,7 +42,7 @@ export async function createAgent(ctx: DeployContext): Promise<void> {
       [ctx.sandboxName, 'agents', 'list', '--json'],
       {
         dryRun: ctx.options.dryRun,
-        timeoutMs: 30_000,
+        timeoutMs: 60_000,
         description: '创建后读取 agent 列表，使用 OpenClaw 返回的实际 workspace'
       }
     );
@@ -54,7 +54,7 @@ export async function createAgent(ctx: DeployContext): Promise<void> {
       [ctx.sandboxName, 'agents', 'list', '--json'],
       {
         dryRun: ctx.options.dryRun,
-        timeoutMs: 30_000,
+        timeoutMs: 60_000,
         description: '创建失败后读取 agent 列表，判断 agent 是否已存在'
       }
     );

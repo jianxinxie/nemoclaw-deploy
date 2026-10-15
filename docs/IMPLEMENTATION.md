@@ -97,7 +97,7 @@ plugins 会读取 `openclaw plugins list --json` 并安装缺失插件；统一�
 
 - 日志中会脱敏 gateway token、常见 token/secret/password 和 npm token。
 - YAML 不允许保存 secret env。
-- openclaw partial 不允许包含 agents 或本地敏感字段。
+- openclaw partial 不允许包含 agents；其他 OpenClaw 业务字段由 CLI 直接合并，不额外拦截 secret 等字段。
 - `onboard.environment` 只允许非敏感 `NEMOCLAW_*` 变量。
 - `--dry-run` 只打印计划和命令，不执行真实操作。
 - 多 agent 部署是 additive 行为：会创建缺少的 agent，不会删除配置外已有 agent。

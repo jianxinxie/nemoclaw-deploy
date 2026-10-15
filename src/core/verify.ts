@@ -9,7 +9,7 @@ export interface VerifyOptions {
 export async function verifyDeployment(ctx: DeployContext, options: VerifyOptions): Promise<void> {
   const agents = await runCommand('nemoclaw', [ctx.sandboxName, 'agents', 'list', '--json'], {
     dryRun: ctx.options.dryRun,
-    timeoutMs: 30_000,
+    timeoutMs: 60_000,
     description: '验证 agent 是否已经出现在 agents list 中'
   });
   if (!agentListContains(agents.stdout, ctx.agentName)) {

@@ -212,47 +212,6 @@ function assertValidPartialConfig(value: unknown): asserts value is Record<strin
       'openclawConfig.file 不允许包含 agents；agent 创建和 workspace 交给 OpenClaw，model 请配置在 deploy.agents[].model'
     );
   }
-  assertNoLocalSecrets(value, 'openclawConfig');
-}
-
-function assertNoLocalSecrets(value: unknown, location: string): void {
-  if (typeof value === 'string') {
-    const containsEmbeddedCredential =
-      /^Bearer\s+/i.test(value) ||
-      /[?&](?:access_?token|token|api_?key|secret)=/i.test(value) ||
-      /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/.test(value);
-    if (containsEmbeddedCredential) {
-      throw new Error(`${location} 包含内嵌凭证，不允许写入本地 openclaw partial JSON`);
-    }
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoLocalSecrets(item, `${location}[${index}]`));
-    return;
-  }
-  if (!isPlainObject(value)) return;
-
-  for (const [key, child] of Object.entries(value)) {
-    if (isSensitiveFieldName(key)) {
-      throw new Error(
-        `${location}.${key} 是敏感字段，不允许写入本地 openclaw partial JSON`
-      );
-    }
-    assertNoLocalSecrets(child, `${location}.${key}`);
-  }
-}
-
-function isSensitiveFieldName(key: string): boolean {
-  const normalized = key.replace(/[._-]/g, '').toLowerCase();
-  return (
-    normalized === 'authorization' ||
-    normalized === 'credential' ||
-    normalized === 'credentials' ||
-    normalized.endsWith('token') ||
-    normalized.endsWith('secret') ||
-    normalized.endsWith('password') ||
-    normalized.endsWith('apikey')
-  );
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

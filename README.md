@@ -152,7 +152,7 @@ deploy:
       file: ./openclaw.json
 ```
 
-普通对象递归合并，标量和数组覆盖，`null` 删除字段。partial 不允许包含 `agents` 或本地 token、secret、password、API key。agent 由 OpenClaw 管理，只有显式填写的 `deploy.agents[].model` 会按 agent ID 定向更新。
+普通对象递归合并，标量和数组覆盖，`null` 删除字段。partial 不允许包含 `agents`；channel 的 `secret` 等 OpenClaw 业务字段会直接合并，CLI 不额外拦截。agent 由 OpenClaw 管理，只有显式填写的 `deploy.agents[].model` 会按 agent ID 定向更新。
 
 插件的 `id/source/force` 留在 `onboard.yaml`，插件 channel 业务配置放在 partial。`deploy.shared.channelServer` 只负责 ChannelServer URL、agent 注册以及 advbot 的动态 gateway 字段。
 
@@ -181,7 +181,7 @@ FORCE_CLI_INSTALL=1 ./install-and-up.sh
 ## 安全提示
 
 - `onboard.inference.apiKey` 可以保存模型凭据，但包含真实值的配置文件不要提交到仓库。
-- gateway token 等其他 secret 仍优先通过环境变量、NemoClaw 官方安全提示或运行平台注入。
+- partial 中可以保存 channel secret，但包含真实凭据的文件不要提交到版本库，并应限制本地文件权限。
 - `agentContent.conflictStrategy: ask` 在非交互模式下按 `fail` 处理。
 - `--dry-run` 不执行安装、onboard、上传或 sandbox 命令。
 
