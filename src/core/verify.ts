@@ -1,9 +1,12 @@
 import type { DeployContext } from './context.js';
 import { agentListContains } from './create-agent.js';
 import { runCommand } from '../utils/run.js';
+import { assertSandboxRunning } from './runtime.js';
+import { verifyWorkspaceSkills, type WorkspaceSkill } from './workspace-skills.js';
 
 export interface VerifyOptions {
   policyApplied: boolean;
+  skills?: WorkspaceSkill[];
 }
 
 export async function verifyDeployment(ctx: DeployContext, options: VerifyOptions): Promise<void> {
@@ -16,10 +19,12 @@ export async function verifyDeployment(ctx: DeployContext, options: VerifyOption
     throw new Error(`验证失败：agents list 中未找到 ${ctx.agentName}`);
   }
 
-  await runCommand('nemoclaw', [ctx.sandboxName, 'status', '--json'], {
+  const status = await runCommand('nemoclaw', [ctx.sandboxName, 'status', '--json'], {
     dryRun: ctx.options.dryRun,
     description: '验证 sandbox 状态仍然可读取'
   });
+  if (!ctx.options.dryRun) assertSandboxRunning(status.stdout);
+  await verifyWorkspaceSkills(ctx, options.skills ?? []);
 
   if (ctx.channelServer.enabled) {
     if (!ctx.channelServer.gatewayToken) throw new Error('验证失败：gatewayToken 未获取');

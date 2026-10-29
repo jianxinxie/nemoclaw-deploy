@@ -199,20 +199,19 @@ function resolveSourceRoot(dir) {
   return dir;
 }
 
-function walk(dir, base = '') {
-  if (!fs.existsSync(dir)) return [];
-  const out = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const rel = path.join(base, entry.name);
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...walk(full, rel));
-    else out.push(rel);
-  }
-  return out;
+function findConflicts(src, dst, relative = '') {
+  const source = fs.lstatSync(src);
+  const target = fs.lstatSync(dst, { throwIfNoEntry: false });
+  if (source.isSymbolicLink()) throw new Error('Agent content contains a symbolic link: ' + src);
+  if (!source.isDirectory()) return target ? [relative] : [];
+  if (target && !target.isDirectory()) return [relative];
+  return fs.readdirSync(src).flatMap((name) =>
+    findConflicts(path.join(src, name), path.join(dst, name), path.join(relative, name))
+  );
 }
 
 const sourceRoot = resolveSourceRoot(sourceDir);
-const conflicts = walk(sourceRoot).filter((rel) => fs.existsSync(path.join(workspace, rel)));
+const conflicts = findConflicts(sourceRoot, workspace);
 process.stdout.write(JSON.stringify(conflicts));
 `;
 
@@ -231,7 +230,6 @@ if (!sourceDir) throw new Error('SOURCE_DIR is required');
 if (!allowed.has(strategy)) throw new Error('Unsupported CONFLICT_STRATEGY: ' + strategy);
 if (!fs.existsSync(sourceDir)) throw new Error('SOURCE_DIR does not exist: ' + sourceDir);
 
-fs.mkdirSync(workspace, { recursive: true });
 const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
 
 function resolveSourceRoot(dir) {
@@ -247,17 +245,24 @@ function resolveSourceRoot(dir) {
   return dir;
 }
 
-function copyEntry(src, dst) {
-  const stat = fs.statSync(src);
-  if (stat.isDirectory()) {
-    fs.mkdirSync(dst, { recursive: true });
-    for (const entry of fs.readdirSync(src)) {
-      copyEntry(path.join(src, entry), path.join(dst, entry));
-    }
-    return;
+function findConflicts(src, dst) {
+  const source = fs.lstatSync(src);
+  const target = fs.lstatSync(dst, { throwIfNoEntry: false });
+  if (source.isSymbolicLink() || (!source.isDirectory() && !source.isFile())) {
+    throw new Error('Agent content must contain ordinary files and directories: ' + src);
   }
+  if (!source.isDirectory()) return target ? [dst] : [];
+  if (target && !target.isDirectory()) return [dst];
+  return fs.readdirSync(src).flatMap((name) => findConflicts(path.join(src, name), path.join(dst, name)));
+}
 
-  if (fs.existsSync(dst)) {
+function copyEntry(src, dst) {
+  const stat = fs.lstatSync(src);
+  if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) {
+    throw new Error('Agent content must contain ordinary files and directories: ' + src);
+  }
+  const target = fs.lstatSync(dst, { throwIfNoEntry: false });
+  if (target && !(stat.isDirectory() && target.isDirectory())) {
     if (strategy === 'skip') return;
     if (strategy === 'fail') throw new Error('Target file already exists: ' + dst);
     if (strategy === 'backup') {
@@ -267,11 +272,29 @@ function copyEntry(src, dst) {
     }
   }
 
+  if (stat.isDirectory()) {
+    fs.mkdirSync(dst, { recursive: true, mode: stat.mode & 0o777 });
+    for (const entry of fs.readdirSync(src)) {
+      copyEntry(path.join(src, entry), path.join(dst, entry));
+    }
+    return;
+  }
+
   fs.mkdirSync(path.dirname(dst), { recursive: true });
   fs.copyFileSync(src, dst);
+  fs.chmodSync(dst, stat.mode & 0o777);
 }
 
 const sourceRoot = resolveSourceRoot(sourceDir);
+const workspaceStat = fs.lstatSync(workspace, { throwIfNoEntry: false });
+if (workspaceStat && !workspaceStat.isDirectory()) {
+  throw new Error('WORKSPACE must be an ordinary directory: ' + workspace);
+}
+const conflicts = findConflicts(sourceRoot, workspace);
+if (strategy === 'fail' && conflicts.length > 0) {
+  throw new Error('Target file already exists: ' + conflicts.join(', '));
+}
+fs.mkdirSync(workspace, { recursive: true });
 for (const entry of fs.readdirSync(sourceRoot)) {
   copyEntry(path.join(sourceRoot, entry), path.join(workspace, entry));
 }

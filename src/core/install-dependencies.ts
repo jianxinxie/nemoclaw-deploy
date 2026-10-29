@@ -89,6 +89,7 @@ function buildDependencyScript(command: string): string {
   const normalizedCommand = command.replace(/\r\n?/g, '\n').replace(/\n*$/, '\n');
   return [
     '#!/usr/bin/env sh',
+    'set -e',
     'cd "$COMMAND_WORKDIR" || exit 1',
     'export PATH="$VIRTUAL_ENV/bin:$PATH"',
     normalizedCommand

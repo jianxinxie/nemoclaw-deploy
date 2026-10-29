@@ -2,6 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { DeployContext } from './context.js';
 import { logger } from '../utils/logger.js';
 import { runCommand } from '../utils/run.js';
+import { assertSandboxRunning } from './runtime.js';
 
 export type RestartGatewayResult = 'skipped' | 'restarted';
 
@@ -29,11 +30,12 @@ async function assertSandboxHealthy(ctx: DeployContext): Promise<void> {
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      await runCommand('nemoclaw', [ctx.sandboxName, 'status', '--json'], {
+      const status = await runCommand('nemoclaw', [ctx.sandboxName, 'status', '--json'], {
         timeoutMs: 60_000,
         logCommand: false,
         description: '确认网关重启后 sandbox 状态可读取'
       });
+      assertSandboxRunning(status.stdout);
       return;
     } catch (error) {
       lastError = error;

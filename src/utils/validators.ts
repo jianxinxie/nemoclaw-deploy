@@ -1,6 +1,17 @@
 import path from 'node:path';
+import { isIP } from 'node:net';
 import fs from 'fs-extra';
 import { z } from 'zod';
+
+export function validateTrustedPrivateHost(input: string): string {
+  const host = input.trim().toLowerCase().replace(/\.$/, '').replace(/^\[([^\]]+)\]$/, '$1');
+  if (!host || (!isIP(host) && !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(host)) ||
+      host.includes('..') || host === 'localhost' || host.endsWith('.localhost') ||
+      /^127\./.test(host) || host === '::1') {
+    throw new Error(`networkPolicy.trustedPrivateHosts 必须是精确主机名或私网 IP，不能包含 URL、端口、通配符或 loopback: ${input}`);
+  }
+  return host;
+}
 
 export const sandboxNameSchema = z.string().regex(/^[a-zA-Z0-9._-]+$/, {
   message: 'sandboxName 只能包含字母、数字、点、下划线和短横线'
@@ -254,36 +265,6 @@ export async function validateAgentContentDir(hostDir: string): Promise<string> 
   return resolved;
 }
 
-export async function collectSkillDirs(hostDir: string): Promise<string[]> {
-  const resolved = path.resolve(hostDir);
-  const stat = await fs.stat(resolved).catch(() => null);
-  if (!stat?.isDirectory()) {
-    throw new Error(`skill.hostDir 不是有效目录: ${hostDir}`);
-  }
-
-  if (await fs.pathExists(path.join(resolved, 'SKILL.md'))) {
-    return [resolved];
-  }
-
-  const entries = await fs.readdir(resolved, { withFileTypes: true });
-  const skillDirs: string[] = [];
-
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-
-    const skillDir = path.join(resolved, entry.name);
-    if (await fs.pathExists(path.join(skillDir, 'SKILL.md'))) {
-      skillDirs.push(skillDir);
-    }
-  }
-
-  if (skillDirs.length === 0) {
-    throw new Error(`skill.hostDir 下没有找到包含 SKILL.md 的 skill 目录: ${hostDir}`);
-  }
-
-  return skillDirs.sort();
-}
-
 export async function collectNetworkPolicyFiles(inputPath: string): Promise<string[]> {
   const resolved = path.resolve(inputPath);
   const stat = await fs.stat(resolved).catch(() => null);
@@ -303,7 +284,7 @@ export async function collectNetworkPolicyFiles(inputPath: string): Promise<stri
 
   const entries = await fs.readdir(resolved, { withFileTypes: true });
   const files = entries
-    .filter((entry) => entry.isFile())
+    .filter((entry) => entry.isFile() && !entry.name.startsWith('.'))
     .map((entry) => path.join(resolved, entry.name))
     .filter(isPolicyFile)
     .sort();

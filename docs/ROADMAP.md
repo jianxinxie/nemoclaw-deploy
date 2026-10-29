@@ -18,7 +18,7 @@
 - dry-run 计划输出与命令预览
 - 统一 `runCommand` 外部命令执行
 - sandbox 预检查、agent 创建、agent-content 安全合并
-- skills 目录批量安装
+- workspace skills 上传与按 agent 验证
 - gateway token 自动获取和脱敏输出
 - dashboard URL 到 gateway URL 推导
 - OpenClaw partial overlay、插件启用状态与 ChannelServer 动态字段单次原子配置事务
@@ -73,4 +73,4 @@ nemoclaw-deploy init-config --output onboard.yaml
 nemoclaw-deploy deploy --config onboard.yaml --dry-run
 ```
 
-真实 NemoClaw 环境中，`nemoclaw-deploy deploy --config onboard.yaml` 应能完成 agent 创建、sandbox 文件/目录上传、指定目录命令执行、skills 安装、advbot 动态配置、network policy 应用和基础验证。
+真实 NemoClaw 环境中，`nemoclaw-deploy deploy --config onboard.yaml` 应能完成 agent 创建、sandbox 文件/目录上传、指定目录命令执行、workspace skills 验证、advbot 动态配置、network policy 应用和基础验证。

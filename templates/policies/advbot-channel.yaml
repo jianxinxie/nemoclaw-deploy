@@ -6,7 +6,7 @@ network_policies:
   advbot-channel:
     name: advbot-channel
     endpoints:
-      - host: 127.0.0.1
+      - host: host.openshell.internal
         port: 8086
         protocol: rest
         enforcement: enforce

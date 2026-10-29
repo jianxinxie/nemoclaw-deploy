@@ -185,7 +185,7 @@ skill 中再调用：
 "$PYTHON" -m your_package.demo
 ```
 
-不建议让 skill 依赖自己安装目录里的 Python 脚本路径，因为安装后的 skill 目录通常不是一个稳定、易记、可跨 agent 复用的路径。
+skills 随 agent 内容上传到 workspace/skills；共享 Python 代码仍建议放到 workspace/scripts 或项目包中，避免各技能重复维护依赖。
 
 ## 手动调试
 

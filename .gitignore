@@ -29,11 +29,20 @@ __pycache__/
 .npmrc
 .nemoclaw-deploy/
 
+# User-supplied IEMS credentials, archive, and platform-specific executable
+/iems/onboard.yaml
+/iems.zip
+/iems-new.zip
+/iems-install-*.zip
+/iems-install-*.zip.sha256
+/iems/ienergy-query
+
 # Temporary files
 tmp/
 temp/
 .tmp/
 .cache/
+.tmp-iems-bundle-*/
 
 # OS and editor files
 .DS_Store

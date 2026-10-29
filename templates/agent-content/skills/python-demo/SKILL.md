@@ -1,3 +1,8 @@
+---
+name: python-demo
+description: Verify the agent workspace Python virtual environment.
+---
+
 # Python Demo
 
 Use this skill when you want to verify that the agent workspace Python virtual environment is available.

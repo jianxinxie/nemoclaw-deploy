@@ -4,7 +4,9 @@
 
 ## 快速开始
 
-要求 Node.js >= 20。
+主机要求 Node.js >=22.19.0，安装脚本优先复用 PATH 或 nvm 中已安装的合格版本，缺少时默认准备 Node.js 24 的可用版本；默认安装 NemoClaw v0.0.139，仍支持已有的 v0.0.134 及更高版本。sandbox 内 Node.js 会按 OpenClaw 的完整版本范围独立检查，主机升级不会更新 sandbox 内的 Node.js。
+
+skills 放到每个 agent 的内容目录下的 `skills/<name>/SKILL.md`，随 workspace 一起上传；独立 `skill` 配置已移除。私网 policy 使用显式 `trustedPrivateHosts` 配置，并通过新版 `policy add` 命令应用。迁移和 IEMS 部署步骤见 [使用说明](docs/USAGE.md)。
 
 ```bash
 npm install -g @advantech-axa/nemoclaw-deploy
@@ -51,7 +53,7 @@ schemaVersion: 3
 install:
   enabled: true
   mode: if-missing
-  version: v0.0.75
+  version: v0.0.139
 
 onboard:
   mode: ensure
@@ -68,7 +70,7 @@ onboard:
     preferredApi: openai-completions
 ```
 
-如果本机 NemoClaw 低于 `install.version`，交互模式会询问是否更新，默认选择“否”；拒绝后继续后续流程。相同或更高版本直接复用，非交互模式发现旧版本时自动更新，`mode: reinstall` 始终按配置显式重装。
+如果本机 NemoClaw 低于 `install.version`，交互模式会询问是否更新，默认选择“否”；拒绝后仍须满足最低版本 v0.0.134 才能继续。相同或更高版本直接复用，非交互模式发现旧版本时自动更新，`mode: reinstall` 始终按配置显式重装。
 
 `onboard.inference.model` 是创建或重建 sandbox 时使用的默认模型。`deploy.agents[].model` 留空时保留 OpenClaw 当前值；填写后仅覆盖对应 agent。已有 sandbox 在 `ensure` 模式下会跳过 onboard，因此需要修改已有 agent 模型时应填写 agent 的 `model`。
 
@@ -82,6 +84,28 @@ onboard:
 ```
 
 CLI 不会再为模型 API key 弹出输入框。该值只会在执行安装/onboard 时注入 provider 对应的 credential 环境变量，命令计划和日志不会显示明文。请使用仅保存在本机且不提交到版本库的配置文件。
+
+安装时同时设置 `NEMOCLAW_INSTALL_TAG` 和优先级更高的 `NEMOCLAW_INSTALL_REF`，确保 `install.version` 不会被主机中遗留的安装 ref 覆盖。
+
+## Dashboard 远程访问
+
+在 `onboard.yaml` 中开启：
+
+```yaml
+onboard:
+  services:
+    dashboardRemoteAccess: true
+```
+
+模板默认 `false`。开启后，官方安装器、显式 onboard 和后续 deploy 命令都会收到 `NEMOCLAW_DASHBOARD_BIND=0.0.0.0`。手动连接仍需传入：
+
+```bash
+NEMOCLAW_DASHBOARD_BIND=0.0.0.0 nemoclaw demo connect
+```
+
+该变量控制所有网卡上的端口监听；NemoClaw v0.0.139 默认打印的 Dashboard URL 仍是 `127.0.0.1`。远程浏览器使用主机实际 IP/域名和相同端口，不要把 `0.0.0.0` 当作访问地址。此开关不会改写 advbot 的 `gatewayUrl`。
+
+如果 sandbox 创建时没有开启，必须先备份，再显式设置 `onboard.mode: recreate` 重建；`ensure` 会跳过可用的已有 sandbox，不会补开远程访问。配置优先级和关闭行为见 [使用说明](docs/USAGE.md#dashboard-远程访问)，上游行为见 [NVIDIA 官方说明](https://docs.nvidia.com/nemoclaw/user-guide/openclaw/reference/commands#environment-variables)。
 
 ## 自定义 sandbox Dockerfile
 
@@ -154,7 +178,13 @@ deploy:
 
 普通对象递归合并，标量和数组覆盖，`null` 删除字段。partial 不允许包含 `agents`；channel 的 `secret` 等 OpenClaw 业务字段会直接合并，CLI 不额外拦截。agent 由 OpenClaw 管理，只有显式填写的 `deploy.agents[].model` 会按 agent ID 定向更新。
 
-插件的 `id/source/force` 留在 `onboard.yaml`，插件 channel 业务配置放在 partial。`deploy.shared.channelServer` 只负责 ChannelServer URL、agent 注册以及 advbot 的动态 gateway 字段。
+写入后会重新读取配置核对合并结果，并通过 `openclaw channels list --all --json` 确认 advbot 账号被识别；检查失败则回滚本次配置事务。全部操作和网关重启结束后还会再次核对配置，确认保存成功后才显示“部署完成”。
+
+插件的来源和安装确认选项留在 `onboard.yaml`，插件 channel 业务配置放在 partial。`deploy.shared.channelServer` 只负责 ChannelServer URL、agent 注册以及 advbot 的动态 gateway 字段。
+
+启用 ChannelServer 时，每次部署都会获取当前 gateway token 和 URL，写入 `channels.advbot.accounts.<advbotAccountId>`，并覆盖 partial 中过时的连接字段；已有账号的其他业务配置及其他账号会保留。token 只用于 sandbox 配置，日志脱敏，主机上的 partial 文件保持原样。
+
+新版 OpenClaw 的安装确认分开配置：`trustSource: true` 确认来源，`acceptCapabilities: true` 接受插件声明的能力，`acknowledgeInstallPolicyWarning: true` 确认安装策略的警告。三项均默认关闭，按实际提示和审查结果开启；只有 `force: true` 会要求重复部署时重装插件。详见[插件安装的来源确认](docs/USAGE.md#插件安装的来源确认)。
 
 ## 部署脚本
 
@@ -166,17 +196,29 @@ chmod +x install-and-up.sh
 ./install-and-up.sh
 ```
 
-脚本会准备 Node.js、安装 CLI，然后执行：
+脚本检查参数、配置与随包 CLI 校验值，准备 Node.js，以独立目录安装并验证 CLI，成功后才切换入口，然后执行：
 
 ```bash
 nemoclaw-deploy up --config onboard.yaml
 ```
 
-如果当前 `PATH` 或脚本专用 npm prefix 中已经存在 `nemoclaw-deploy`，脚本会直接复用，不访问 npm 获取新版本。需要显式重新安装时使用：
+存在随包 CLI 时，脚本按 SHA256 复用本地安装，同版本修复也能自动更新；没有随包 CLI 时，优先复用脚本专用 prefix，然后检查 PATH 中版本 >=0.0.9 的 CLI。安装失败保留旧 CLI。需要显式重新安装时使用：
 
 ```bash
 FORCE_CLI_INSTALL=1 ./install-and-up.sh
 ```
+
+使用 `--prepare-only` 可以安装 Node.js/CLI 并检查完整计划，不安装 NemoClaw 或创建 sandbox；之后 `--dry-run` 可复用准备好的 CLI。`--config <file>` 在准备环境前选择并检查配置，`--help` 无需配置或 Node.js，未知参数立即失败。同一 npm prefix 使用 `flock` 防止并发安装（Linux 安装 util-linux）；失败会显示阶段及退出码，并清理临时文件。
+
+安装失败后可以重新运行同一入口。脚本会复用已安装的合格 Node.js，加载 nvm 时不自动激活可能失效的默认别名。可用 `NODE_VERSION=24` 选择主版本，或指定完整补丁版本。nvm 的 `Version not found` 也可能是版本索引不可达，请检查 `NVM_NODEJS_ORG_MIRROR` 和代理。
+
+nvm 和 NVIDIA 安装器均先完整下载，再执行；下载启用有限重试。官方安装器内部若报 `release-assets.githubusercontent.com` 的 SSL 错误，需要修复目标主机的 GitHub 网络或 HTTPS 代理后重试。CLI 不自动重跑整个官方安装流程。
+
+`NPM_OFFLINE=1` 禁止 npm 联网；IEMS 随包 CLI 携带锁定的生产依赖，支持空 npm 缓存安装，其他自定义包可能仍需要缓存。这不是完整离线部署。可用 `NEMOCLAW_INSTALLER_FILE` 指向预先获取的 NVIDIA 官方入口脚本，并用 `NEMOCLAW_INSTALLER_SHA256` 校验。入口脚本会先检查非空和 Bash 语法，内部依赖下载仍需网络。`up` 在安装前检查本地部署资源；已有但无法报告版本的 NemoClaw 会按安装策略修复，并避免 PATH 中旧入口遮蔽新版。
+
+在源码仓库执行 `npm run bundle:iems`，可重建含 CLI、安装入口及两级 SHA256 清单的 IEMS 包，并自动进行解压校验。IEMS 业务配置仅进入内部 ZIP，不进入公开 npm 包。
+
+`NPM_OFFLINE=1 npm run test:bundle` 从 ZIP 进行空缓存的真实 CLI 安装与重复运行检查，不创建 sandbox。
 
 ## 安全提示
 

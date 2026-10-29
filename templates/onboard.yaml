@@ -7,7 +7,7 @@ install:
   enabled: true
   # if-missing / reinstall
   mode: if-missing
-  version: v0.0.88
+  version: v0.0.139
 
 onboard:
   # ensure / resume / fresh / recreate
@@ -52,6 +52,12 @@ onboard:
       - public-reference
       - weather
 
+  services:
+    # true: 创建时启用 NEMOCLAW_DASHBOARD_BIND=0.0.0.0，后续部署继续传入。
+    # false: 使用官方默认监听行为（非 WSL 为 loopback）。
+    # 已有 sandbox 若创建时未开启，需要备份后显式用 mode: recreate 重建。
+    dashboardRemoteAccess: false
+
   # 使用 --non-interactive 时必须改为 true。
   options:
     acceptThirdPartySoftware: false
@@ -67,6 +73,14 @@ deploy:
           source: "@wecom/wecom-openclaw-plugin"
         - id: advbot
           source: "@advantech-axa/advbot"
+          # 审查并信任来源后设为 true：首次安装传入 --force，重复部署不重装。
+          trustSource: false
+          # 审查插件声明的能力后设为 true；安装时传入 --accept-capabilities。
+          acceptCapabilities: false
+          # 仅明确接受 security.installPolicy 的 warn 时开启；不会绕过 block。
+          acknowledgeInstallPolicyWarning: false
+          # 需要重装已安装插件时才开启。
+          force: false
 
     # OpenClaw 的 models、tools、channels 等配置从 partial 文件合并。
     openclawConfig:
@@ -74,19 +88,22 @@ deploy:
       file: ./openclaw.json
 
     # ChannelServer 用于补充 advbot 动态 gateway 字段和注册 agents。
+    # 需要 sandbox 已安装 advbot，或启用上方 plugins 并确认相应安装选项。
     channelServer:
       enabled: true
       advbotAccountId: default
-      url: http://127.0.0.1:8086
+      url: http://host.openshell.internal:8086
 
     networkPolicy:
       enabled: true
       # 支持单个 .yaml/.yml 文件或包含多个 policy 的目录。
       dir: ./policies
+      # 私网服务需显式列出精确主机名/IP；目录整体应用。
+      trustedPrivateHosts: []
 
     options:
       # 所有 agent 和共享配置处理完成后，只重启一次 gateway。
-      restartGateway: false
+      restartGateway: true
 
   agents:
     - name: my-agent
@@ -108,9 +125,7 @@ deploy:
           - .pytest_cache
           - "*.pyc"
 
-      skill:
-        enabled: true
-        hostDir: ./agent-content/skills
+      # skills 放入 agentContent.hostDir 下的 skills/，随内容上传。
 
       # 面向当前 agent 的通用 sandbox 操作。
       sandbox:

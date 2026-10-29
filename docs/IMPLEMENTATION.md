@@ -27,10 +27,11 @@
 2. 如果缺少且允许安装，执行 NVIDIA 官方安装器：
 
    ```bash
-   curl -fsSL https://www.nvidia.com/nemoclaw.sh | NEMOCLAW_INSTALL_TAG=v0.0.75 bash
+   curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 120 --connect-timeout 15 --max-time 120 https://www.nvidia.com/nemoclaw.sh -o <installer.sh>
+   NEMOCLAW_INSTALL_TAG=v0.0.139 NEMOCLAW_INSTALL_REF=v0.0.139 bash <installer.sh>
    ```
 
-   安装版本由 `onboard.yaml` 中的 `install.version` 固定，CLI 会通过 `NEMOCLAW_INSTALL_TAG` 传给官方安装器。若本机已有 `nemoclaw` 且语义版本低于配置版本，交互模式会询问是否更新，拒绝后继续后续流程；相同或更高版本不会触发安装。非交互模式自动更新旧版本，`reinstall` 模式始终显式重装。
+   安装器下载到独立临时目录，下载成功才执行，结束后清理；仅下载阶段有限重试，不重跑整个安装器。安装版本由 `onboard.yaml` 中的 `install.version` 固定，CLI 会通过 `NEMOCLAW_INSTALL_TAG` 和 `NEMOCLAW_INSTALL_REF` 传给官方安装器。若本机已有 `nemoclaw` 且语义版本低于配置版本，交互模式会询问是否更新，拒绝后继续后续流程；相同或更高版本不会触发安装。非交互模式自动更新旧版本，`reinstall` 模式始终显式重装。
    `onboard.services.openShellGatewayPort` 会映射为 `NEMOCLAW_GATEWAY_PORT`，用于固定 OpenShell gateway 端口；不配置时使用 NemoClaw 默认端口。CLI 会拒绝 dashboard 自动分配范围 `18789-18799`、默认推理/代理端口 `8000`、`11434`、`11435`，也会拒绝和其他已配置服务端口重复。
    `onboard.inference.endpointUrl` 会映射为 `NEMOCLAW_ENDPOINT_URL`。`onboard.inference.apiKey` 只从 YAML 读取，并在运行时注入到 NemoClaw 期望的 credential env，例如 `custom` -> `COMPATIBLE_API_KEY`，`anthropicCompatible` -> `COMPATIBLE_ANTHROPIC_API_KEY`；CLI 不会额外提示输入，日志会脱敏且不会打印真实 key。
 
@@ -49,18 +50,18 @@
 
 1. 校验所有 agent 属于同一个 sandbox，并且 agent 名称、workspace 不重复。
 2. 执行 sandbox 预检查。
-3. 创建或确认每个 agent。
-4. 处理每个 agent 的初始化内容。
-5. 按 `deploy.agents[].sandbox.uploads` 上传主机文件或目录到 sandbox。
-6. 安装每个 agent 自己配置的 skills。
+3. 应用 sandbox 共享 network policies，失败时立即停止；后续插件、内容或 channel 错误不会跳过已应用的策略。
+4. 创建或确认每个 agent。
+5. 处理每个 agent 的初始化内容，skills 随内容安全上传到 workspace。
+6. 按 `deploy.agents[].sandbox.uploads` 上传主机文件或目录到 sandbox。
 7. 安装 sandbox 共享 plugins。
 8. 准备 ChannelServer 和 advbot 动态连接字段。
 9. 合并 partial JSON、插件启用状态、ChannelServer 动态字段和显式 agent model，原子写入一次 `openclaw.json`。
-10. 应用 sandbox 共享 network policies。
+10. 验证插件启用状态和 advbot channel 支持。
 11. 按 `env.directory` 写入每个 agent 的 env 文件；未指定目录时使用 workspace。
 12. 在配置的 sandbox 工作目录执行每个 agent 的 `sandbox.commands`。
-13. 验证 agent 和 sandbox 状态。
-14. 清理 sandbox 临时目录并按配置统一重启 gateway。
+13. 清理 sandbox 临时目录并按配置统一重启 gateway。
+14. 验证 agent、sandbox 和各 workspace skills 状态。
 15. 为开启 `channelRegistration` 的每个 agent 调用 channel server 注册接口；失败时按 `continueOnError` 决定继续或终止。
 
 ## 关键实现
@@ -69,13 +70,13 @@
 
 agent content 不会直接上传覆盖 workspace。CLI 会先上传到 `/tmp/nemoclaw-deploy/<agent>/agent-content`，再在 sandbox 内执行合并脚本。支持 `ask`、`skip`、`backup`、`overwrite`、`fail` 冲突策略，并支持 ignore 规则。
 
-每个 agent 的 skills 会从 `agents[].skill.hostDir` 中自动发现所有包含 `SKILL.md` 的目录，然后逐个执行：
+每个 agent 的 skills 位于 `agentContent.hostDir/skills/<name>/SKILL.md`，与 agent 内容一起安全合并到目标 workspace。上传前校验 frontmatter，部署后按目标 agent 验证发现路径及可用状态：
 
 ```bash
-nemoclaw <sandbox> skill install <skillDir>
+nemoclaw <sandbox> exec -- openclaw skills list --agent <agent> --json
 ```
 
-network policy 支持单个 `.yaml/.yml` 文件或目录。目录模式会按文件名排序后逐个执行 `policy-add`。
+network policy 支持单个 `.yaml/.yml` 文件或目录。目录模式使用 `policy add --from-dir` 整体应用，并传入显式配置的 `--trusted-private-host`，不会修改源策略文件。策略在 sandbox 预检查之后、创建 agent 和安装插件之前执行一次；日志列出全部策略文件并展示 NemoClaw 的应用结果。若后续步骤失败，已应用的策略保留，重试部署时再次交给 NemoClaw 处理。
 
 agent env 会合并写入 `env.directory` 下的目标文件；目录未指定时默认写入每个 agent 的 workspace `.env`。工具会自动写入：
 
@@ -87,9 +88,9 @@ agent env 会合并写入 `env.directory` 下的目标文件；目录未指定�
 
 `sandbox.commands` 会在每个 agent 指定的 `workingDir` 下执行命令。执行时 CLI 会注入 `WORKSPACE`、`VIRTUAL_ENV`、`PYTHON`，并把 `$VIRTUAL_ENV/bin` 放到 `PATH` 前面。为避免 OpenShell exec argv 拒绝换行，CLI 会把每条命令写成 sandbox 临时脚本，上传到 `/tmp/nemoclaw-deploy/<agent>/sandbox-commands/` 后通过 `sh <script>` 执行。
 
-OpenClaw 配置采用单次事务：先读取 agent 创建和插件安装后的最新 `openclaw.json`，再依次合并用户 partial、插件启用状态、ChannelServer/advbot 动态字段，并按 agent ID 设置显式 model。partial 是 `tools`、`channels` 等 OpenClaw 业务配置的唯一用户配置源，且不允许修改 `agents`，因此 workspace 等字段完全保留。写入使用同目录临时文件和原子 rename，写前保留临时备份；`openclaw config validate` 失败时自动回滚。
+OpenClaw 配置采用单次事务：先读取 agent 创建和插件安装后的最新 `openclaw.json`，再依次合并用户 partial、插件启用状态、ChannelServer/advbot 动态字段，并按 agent ID 设置显式 model。partial 是 `tools`、`channels` 等 OpenClaw 业务配置的唯一用户配置源，且不允许修改 `agents`，因此 workspace 等字段完全保留。写入使用同目录临时文件和原子 rename，写前保留临时备份。sandbox 临时目录另存权限为 0600 的预期配置，用于写入后及网关重启后的读取核验；临时目录在最终核验之后清理。`openclaw config validate`、首次读取核验或 advbot 账号识别失败时自动回滚。
 
-plugins 会读取 `openclaw plugins list --json` 并安装缺失插件；统一事务只负责启用已安装插件，不再接收 plugin item 内的 channel 配置。ChannelServer 集成会自动获取 gateway token 和 URL，并只补充 `channels.advbot` 中必须动态生成的连接字段。
+plugins 会读取 `openclaw plugins list --json` 并安装缺失插件；统一事务只负责启用已安装插件，不再接收 plugin item 内的 channel 配置。ChannelServer 集成每次都会自动获取当前 gateway token 和 URL，并只补充 `channels.advbot` 中必须动态生成的连接字段；已有账号也携带真实动态字段参与合并，防止 partial 中的旧值覆盖它们，不再用脱敏占位符代替真实 token。channel 核验解析 `openclaw channels list --all --json` 的 `chat.advbot`，确认目标账号存在。
 
 `sandbox.uploads` 同时支持主机文件和目录。文件会直接上传并验证目标；目录先上传到 agent 临时目录，再由 sandbox 内脚本递归合并。`overwrite=false` 会先完成全量冲突扫描，避免上传到一半才失败；`overwrite=true` 覆盖冲突项并保留目标目录额外内容。channel registration 通过统一 `runCommand` 调用主机 `curl`，非 2xx 响应会使部署失败。
 

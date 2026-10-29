@@ -6,8 +6,8 @@ install:
   # if-missing / reinstall
   mode: if-missing
   # 固定 NemoClaw 官方安装 tag，避免默认 lkg 随时间变化。
-  # 可选值：v0.0.75、其他官方 tag；如需跟随官方推荐可改成 lkg。
-  version: v0.0.88
+  # 可选值：v0.0.139、其他受支持的官方 tag；如需跟随官方推荐可改成 lkg。
+  version: v0.0.139
 
 onboard:
   # ensure / resume / fresh / recreate
@@ -59,7 +59,7 @@ onboard:
     # 完整模板默认显式选择常用开发和通用访问策略，便于审查实际开放范围。
     mode: custom
     # mode=custom 时必须至少填写一个 preset。
-    # 以下名称均来自 NemoClaw v0.0.75；请删除当前 sandbox 不需要的权限。
+    # 以下名称均来自 NemoClaw v0.0.139；请删除当前 sandbox 不需要的权限。
     presets:
       - npm
       - pypi
@@ -82,6 +82,11 @@ onboard:
     agentTimeout: null
 
   services:
+    # true: 创建时启用 NEMOCLAW_DASHBOARD_BIND=0.0.0.0，后续部署继续传入。
+    # false: 清除同名环境变量，使用官方默认监听行为（非 WSL 为 loopback）。
+    # 若创建时未开启，必须备份后显式用 mode: recreate 重建；ensure 不会重配。
+    # 手动连接时仍需 NEMOCLAW_DASHBOARD_BIND=0.0.0.0 nemoclaw <name> connect。
+    dashboardRemoteAccess: false
     # 以及默认推理/代理端口 8000、11434、11435。
     openShellGatewayPort: null
     # 其他服务端口范围 1024-65535；null 使用 NemoClaw 默认值。
@@ -118,6 +123,15 @@ deploy:
           source: "@wecom/wecom-openclaw-plugin"
         - id: advbot
           source: "@advantech-axa/advbot"
+          # 审查并信任来源后设为 true：首次安装传入 --force，重复部署不重装。
+          trustSource: false
+          # 明确接受插件声明的能力，安装时传入 --accept-capabilities。
+          acceptCapabilities: false
+          # 仅确认安装策略的 warn；传入 --acknowledge-install-policy-warning。
+          # block 或策略执行失败仍然终止部署。
+          acknowledgeInstallPolicyWarning: false
+          # 明确要求重新安装已安装插件；也会传入 --force。
+          force: false
 
     # 可选的不完整 openclaw.json，以现有配置为基线递归合并。
     # tools、channels 等 OpenClaw 业务配置统一放在该文件中。
@@ -127,19 +141,22 @@ deploy:
       file: ./openclaw.json
 
     # ChannelServer 用于补充 advbot 动态 gateway 字段和注册 agents。
+    # 需要 sandbox 已安装 advbot，或启用上方 plugins 并确认相应安装选项。
     channelServer:
       enabled: true
       advbotAccountId: default
-      url: http://127.0.0.1:8086
+      url: http://host.openshell.internal:8086
 
     networkPolicy:
       enabled: true
       # 支持单个 .yaml/.yml 文件或包含多个 policy 的目录。
       dir: ./policies
+      # 私网服务需显式列出精确主机名/IP；目录整体应用。
+      trustedPrivateHosts: []
 
     options:
       # 所有 agent 和共享配置处理完成后，只重启一次 gateway。
-      restartGateway: false
+      restartGateway: true
 
   agents:
     - name: test
@@ -152,7 +169,7 @@ deploy:
 
       agentContent:
         enabled: true
-        hostDir: ./workspace
+        hostDir: ./agent-content
         # ask / skip / backup / overwrite / fail
         conflictStrategy: ask
         ignore:
@@ -164,9 +181,7 @@ deploy:
           - .pytest_cache
           - "*.pyc"
 
-      skill:
-        enabled: true
-        hostDir: ./workspace/skills
+      # skills 放入 agentContent.hostDir 下的 skills/，随内容上传。
 
       # 面向当前 agent 的通用 sandbox 操作。
       sandbox:

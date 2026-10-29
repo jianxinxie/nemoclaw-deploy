@@ -5,6 +5,8 @@ import fs from 'fs-extra';
 import { z } from 'zod';
 import { resolveFromBase } from '../utils/fs.js';
 import { readYamlFile } from '../utils/yaml.js';
+import { assertNoLegacySkillConfig } from '../utils/config-migration.js';
+import { resolveDashboardRemoteAccess } from './dashboard.js';
 import {
   conflictStrategySchema,
   isPluginHostPathSource,
@@ -21,7 +23,8 @@ import {
   validatePluginId,
   validatePluginSource,
   validateSandboxCopyDestination,
-  validateSandboxName
+  validateSandboxName,
+  validateTrustedPrivateHost
 } from '../utils/validators.js';
 
 export type ConflictStrategy = 'ask' | 'skip' | 'backup' | 'overwrite' | 'fail';
@@ -31,7 +34,12 @@ export interface PluginItemConfig {
   channelId?: string;
   source?: string;
   sourceKind: 'path' | 'spec' | 'none';
+  /** Pass --force to acknowledge the source review gate and reinstall existing plugins. */
   force: boolean;
+  /** Acknowledge install provenance without forcing repeat deployments to reinstall. */
+  trustSource: boolean;
+  acceptCapabilities: boolean;
+  acknowledgeInstallPolicyWarning: boolean;
 }
 
 export interface SandboxUploadConfig {
@@ -51,11 +59,6 @@ export interface DeployContext {
     hostDir?: string;
     conflictStrategy: ConflictStrategy;
     ignore: string[];
-  };
-
-  skill: {
-    enabled: boolean;
-    hostDir?: string;
   };
 
   sandbox: {
@@ -98,6 +101,7 @@ export interface DeployContext {
   networkPolicy: {
     enabled: boolean;
     dir?: string;
+    trustedPrivateHosts: string[];
   };
 
   env: {
@@ -123,6 +127,7 @@ export interface DeployCliOptions {
 export interface DeployPlan {
   schemaVersion: 3;
   sandboxName: string;
+  dashboardRemoteAccess: boolean;
   agents: DeployContext[];
 }
 
@@ -131,11 +136,6 @@ const agentContentSchema = z.object({
   hostDir: z.string().optional(),
   conflictStrategy: conflictStrategySchema.optional(),
   ignore: z.array(z.string()).optional()
-}).strict().optional();
-
-const skillSchema = z.object({
-  enabled: z.boolean().optional(),
-  hostDir: z.string().optional()
 }).strict().optional();
 
 const sandboxUploadsSchema = z.object({
@@ -173,7 +173,10 @@ const pluginsSchema = z.object({
     id: z.string(),
     channelId: z.string().optional(),
     source: z.string().optional().nullable(),
-    force: z.boolean().optional()
+    force: z.boolean().optional(),
+    trustSource: z.boolean().optional(),
+    acceptCapabilities: z.boolean().optional(),
+    acknowledgeInstallPolicyWarning: z.boolean().optional()
   }).strict()).optional()
 }).strict().optional();
 
@@ -190,7 +193,8 @@ const channelServerSchema = z.object({
 
 const networkPolicySchema = z.object({
   enabled: z.boolean().optional(),
-  dir: z.string().optional()
+  dir: z.string().optional(),
+  trustedPrivateHosts: z.array(z.string()).optional()
 }).strict().optional();
 
 const deployOptionsSchema = z.object({
@@ -210,7 +214,6 @@ const agentDeploySchema = z.object({
   workspace: z.string().optional().nullable(),
   model: z.string().optional().nullable(),
   agentContent: agentContentSchema,
-  skill: skillSchema,
   sandbox: z.object({
     uploads: sandboxUploadsSchema,
     commands: sandboxCommandsSchema
@@ -223,7 +226,9 @@ const unifiedDeployConfigSchema = z.object({
   schemaVersion: z.literal(3),
   install: z.unknown().optional(),
   onboard: z.object({
-    sandbox: z.object({ name: z.string() }).passthrough()
+    sandbox: z.object({ name: z.string() }).passthrough(),
+    services: z.object({ dashboardRemoteAccess: z.boolean().optional() }).passthrough().optional(),
+    environment: z.record(z.string(), z.unknown()).optional()
   }).passthrough(),
   deploy: z.object({
     shared: sharedDeploySchema,
@@ -237,7 +242,6 @@ const normalizedAgentConfigSchema = z.object({
   workspace: z.string().optional().nullable(),
   model: z.string().optional().nullable(),
   agentContent: agentContentSchema,
-  skill: skillSchema,
   sandbox: z.object({
     uploads: sandboxUploadsSchema,
     commands: sandboxCommandsSchema
@@ -255,6 +259,7 @@ type DeployConfigInput = z.infer<typeof normalizedAgentConfigSchema>;
 
 interface NormalizedDeployConfig {
   schemaVersion: 3;
+  dashboardRemoteAccess: boolean;
   configs: DeployConfigInput[];
 }
 
@@ -300,6 +305,7 @@ export async function collectDeployPlan(options: DeployCliOptions): Promise<Depl
   return {
     schemaVersion: normalized.schemaVersion,
     sandboxName: agents[0].sandboxName,
+    dashboardRemoteAccess: normalized.dashboardRemoteAccess,
     agents
   };
 }
@@ -372,23 +378,6 @@ async function collectOneDeployContext(
         interactive
       })
     : [];
-
-  const skillEnabled = await readOptionalBoolean({
-    current: config.skill?.enabled,
-    interactive,
-    promptMessage: '是否安装 skills？',
-    defaultValue: true
-  });
-
-  const skillHostDir = skillEnabled
-    ? await readOptionalPath({
-        current: config.skill?.hostDir,
-        configBaseDir,
-        interactive,
-        label: 'skill.hostDir',
-        promptMessage: '请输入 skills 主机目录：'
-      })
-    : undefined;
 
   const fileCopiesEnabled = await readOptionalBoolean({
     current: config.sandbox?.uploads?.enabled,
@@ -552,10 +541,6 @@ async function collectOneDeployContext(
       conflictStrategy: agentContentConflictStrategy,
       ignore: agentContentIgnore
     },
-    skill: {
-      enabled: skillEnabled,
-      hostDir: skillHostDir
-    },
     sandbox: {
       uploads: {
         enabled: fileCopiesEnabled,
@@ -588,7 +573,8 @@ async function collectOneDeployContext(
     },
     networkPolicy: {
       enabled: networkPolicyEnabled,
-      dir: networkPolicyDir
+      dir: networkPolicyDir,
+      trustedPrivateHosts: [...new Set((config.networkPolicy?.trustedPrivateHosts ?? []).map(validateTrustedPrivateHost))]
     },
     env: {
       enabled: envEnabled,
@@ -597,15 +583,16 @@ async function collectOneDeployContext(
       variables: envVariables
     },
     options: {
-      restartGateway: config.options?.restartGateway ?? false,
+      restartGateway: config.options?.restartGateway ?? true,
       nonInteractive: Boolean(options.nonInteractive),
       dryRun: Boolean(options.dryRun)
     }
   };
 }
 
-async function loadDeployConfigs(configPath: string): Promise<NormalizedDeployConfig> {
+export async function loadDeployConfigs(configPath: string): Promise<NormalizedDeployConfig> {
   const raw = await readYamlFile(configPath);
+  assertNoLegacySkillConfig(raw);
   const result = unifiedDeployConfigSchema.safeParse(raw ?? {});
   if (!result.success) {
     throw new Error(`统一 onboard.yaml 的 deploy 配置格式无效: ${result.error.message}`);
@@ -614,13 +601,13 @@ async function loadDeployConfigs(configPath: string): Promise<NormalizedDeployCo
   const shared = result.data.deploy.shared ?? {};
   return {
     schemaVersion: 3,
+    dashboardRemoteAccess: resolveDashboardRemoteAccess(result.data.onboard),
     configs: result.data.deploy.agents.map((agent) => ({
       sandboxName: result.data.onboard.sandbox.name,
       agentName: agent.name,
       workspace: agent.workspace,
       model: agent.model,
       agentContent: agent.agentContent,
-      skill: agent.skill,
       sandbox: agent.sandbox,
       channelRegistration: agent.channelRegistration,
       plugins: shared.plugins,
@@ -871,6 +858,9 @@ interface RawPluginItem {
   channelId?: string;
   source?: string | null;
   force?: boolean;
+  trustSource?: boolean;
+  acceptCapabilities?: boolean;
+  acknowledgeInstallPolicyWarning?: boolean;
 }
 
 async function readPluginItems(inputOptions: {
@@ -921,9 +911,14 @@ function parsePluginItem(raw: RawPluginItem, configBaseDir: string): PluginItemC
   const id = validatePluginId(raw.id);
   const channelId = raw.channelId ? validatePluginId(raw.channelId) : undefined;
   const force = Boolean(raw.force);
+  const consent = {
+    trustSource: raw.trustSource ?? false,
+    acceptCapabilities: raw.acceptCapabilities ?? false,
+    acknowledgeInstallPolicyWarning: raw.acknowledgeInstallPolicyWarning ?? false
+  };
   const source = normalizeOptionalString(raw.source ?? undefined);
   if (!source) {
-    return { id, channelId, sourceKind: 'none', force };
+    return { id, channelId, sourceKind: 'none', force, ...consent };
   }
 
   const validated = validatePluginSource(source);
@@ -936,11 +931,12 @@ function parsePluginItem(raw: RawPluginItem, configBaseDir: string): PluginItemC
       channelId,
       source: resolveFromBase(configBaseDir, expanded),
       sourceKind: 'path',
-      force
+      force,
+      ...consent
     };
   }
 
-  return { id, channelId, source: validated, sourceKind: 'spec', force };
+  return { id, channelId, source: validated, sourceKind: 'spec', force, ...consent };
 }
 
 async function readDependencyCommands(inputOptions: {

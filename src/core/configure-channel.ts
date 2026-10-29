@@ -22,28 +22,24 @@ export async function prepareChannelServer(ctx: DeployContext): Promise<PrepareC
 
   ctx.channelServer.url = validateChannelServerUrl(ctx.channelServer.url);
 
-  const existingChannel = await getExistingAdvbotChannel(ctx);
-  if (existingChannel.matches) {
-    ctx.channelServer.gatewayUrl = existingChannel.gatewayUrl;
-    const config = buildAdvbotConfig(ctx, ctx.channelServer.gatewayToken);
-    ctx.channelServer.gatewayToken = ctx.channelServer.gatewayToken || '******';
-    logger.info(
-      `channels.advbot.accounts.${ctx.channelServer.advbotAccountId} 已存在且配置可用，跳过动态 ChannelServer 字段更新。`
-    );
-    return { status: 'skipped', restarted: false, reason: 'existing', config };
-  }
-
+  // Always resolve the live gateway values, even on repeat deployments. The
+  // overlay may contain stale connection fields which this plan must override.
   await ensureGatewayToken(ctx);
   await ensureGatewayUrl(ctx);
 
   const gatewayToken = requireValue(ctx.channelServer.gatewayToken, 'gatewayToken');
-  const gatewayUrl = validateGatewayUrl(requireValue(ctx.channelServer.gatewayUrl, 'gatewayUrl'));
-  ctx.channelServer.gatewayUrl = gatewayUrl;
-
-  const advbotConfig = buildAdvbotConfig(ctx, gatewayToken);
+  ctx.channelServer.gatewayUrl = validateGatewayUrl(requireValue(ctx.channelServer.gatewayUrl, 'gatewayUrl'));
+  const config = buildAdvbotConfig(ctx, gatewayToken);
+  const existingChannel = await getExistingAdvbotChannel(ctx);
+  if (existingChannel.matches) {
+    logger.info(
+      `channels.advbot.accounts.${ctx.channelServer.advbotAccountId} 已存在且与当前 gateway 一致，将在合并时保留动态连接字段。`
+    );
+    return { status: 'skipped', restarted: false, reason: 'existing', config };
+  }
 
   logger.info(`Gateway Token: ${maskSecret(gatewayToken)}`);
-  return { status: 'configured', restarted: false, config: advbotConfig };
+  return { status: 'configured', restarted: false, config };
 }
 
 function buildAdvbotConfig(
@@ -73,14 +69,25 @@ export async function verifyAdvbotChannelSupported(ctx: DeployContext): Promise<
   try {
     const result = await runCommand(
       'nemoclaw',
-      [ctx.sandboxName, 'exec', '--', 'openclaw', 'channels', 'list', '--all'],
+      [ctx.sandboxName, 'exec', '--', 'openclaw', 'channels', 'list', '--all', '--json'],
       {
         timeoutMs: 30_000,
         description: '确认当前 OpenClaw 支持 advbot channel'
       }
     );
 
-    if (!/\badvbot\b/i.test(result.stdout)) {
+    // Plugin discovery logs may mention advbot even if it failed to load.
+    const start = result.stdout.indexOf('{');
+    const end = result.stdout.lastIndexOf('}');
+    const parsed = JSON.parse(result.stdout.slice(start, end + 1)) as {
+      chat?: { advbot?: string[] | { accounts?: unknown; installed?: boolean; origin?: string } };
+    };
+    const channel = parsed.chat?.advbot;
+    // OpenClaw 2026.9.2 returns { accounts, installed, origin }; older releases
+    // returned an array of account ids directly under chat.<channel>.
+    const accounts = Array.isArray(channel) ? channel : channel?.accounts;
+    const installed = Array.isArray(channel) || channel?.installed === true;
+    if (!installed || !Array.isArray(accounts) || !accounts.includes(ctx.channelServer.advbotAccountId)) {
       throw new Error(buildUnsupportedAdvbotMessage(ctx.sandboxName));
     }
   } catch (error) {
@@ -105,7 +112,6 @@ export async function verifyAdvbotChannelSupported(ctx: DeployContext): Promise<
 
 interface ExistingAdvbotChannel {
   matches: boolean;
-  gatewayUrl?: string;
 }
 
 async function getExistingAdvbotChannel(ctx: DeployContext): Promise<ExistingAdvbotChannel> {
@@ -135,12 +141,10 @@ async function getExistingAdvbotChannel(ctx: DeployContext): Promise<ExistingAdv
 
   try {
     const parsed = JSON.parse(result.stdout) as ExistingAdvbotChannel;
-    if (parsed.gatewayUrl) {
-      parsed.gatewayUrl = validateGatewayUrl(parsed.gatewayUrl);
-    }
+    if (typeof parsed.matches !== 'boolean') throw new Error('missing matches');
     return parsed;
   } catch {
-    logger.warn(`无法解析现有 channel 配置检查结果，将继续重新配置 channel: ${result.stdout}`);
+    logger.warn('无法解析现有 channel 配置检查结果，将继续重新配置 channel。');
     return { matches: false };
   }
 }
@@ -152,6 +156,7 @@ async function ensureGatewayToken(ctx: DeployContext): Promise<void> {
     const result = await runCommand('nemoclaw', [ctx.sandboxName, 'gateway-token', '--quiet'], {
       dryRun: ctx.options.dryRun,
       sensitive: true,
+      rawOutput: true,
       description: '自动获取 gateway token，用于 advbot 连接 gateway'
     });
     const token = result.stdout.trim();
@@ -182,6 +187,7 @@ async function ensureGatewayUrl(ctx: DeployContext): Promise<void> {
     const result = await runCommand('nemoclaw', [ctx.sandboxName, 'dashboard-url', '--quiet'], {
       dryRun: ctx.options.dryRun,
       sensitive: true,
+      rawOutput: true,
       description: '获取 dashboard URL，并推导不含 token fragment 的 gateway URL'
     });
     const dashboardUrl = result.stdout.trim();
@@ -217,7 +223,7 @@ function buildUnsupportedAdvbotMessage(sandboxName: string): string {
   return [
     '当前 OpenClaw 不支持 advbot channel，已停止配置 channels.advbot。',
     '请先确认 advbot channel/plugin 已安装并能在下面命令中看到：',
-    `nemoclaw ${sandboxName} exec -- openclaw channels list --all`,
+    `nemoclaw ${sandboxName} exec -- openclaw channels list --all --json`,
     '如果这个 OpenClaw 版本没有 advbot channel，请在 onboard.yaml 中设置 deploy.shared.channelServer.enabled: false。'
   ].join('\n');
 }
@@ -275,15 +281,15 @@ try {
     pluginEntry &&
     pluginEntry.enabled === true &&
     account.enabled === true &&
+    account.accountId === accountId &&
     channelServerUrl === desiredChannelServerUrl &&
     Boolean(gatewayToken) &&
     /^wss?:\\/\\//.test(gatewayUrl) &&
-    (!desiredGatewayUrl || gatewayUrl === desiredGatewayUrl) &&
-    (!desiredGatewayToken || gatewayToken === desiredGatewayToken);
+    gatewayUrl === desiredGatewayUrl &&
+    gatewayToken === desiredGatewayToken;
 
   finish({
-    matches,
-    gatewayUrl: matches ? gatewayUrl : undefined
+    matches: Boolean(matches)
   });
 } catch {
   finish({ matches: false });

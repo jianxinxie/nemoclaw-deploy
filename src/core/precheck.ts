@@ -1,19 +1,23 @@
 import type { DeployContext } from './context.js';
 import { runCommand } from '../utils/run.js';
+import { assertMinimumVersion, MIN_NEMOCLAW_VERSION } from '../utils/versions.js';
+import { assertSandboxRunning, checkOpenClawRuntime } from './runtime.js';
 
 export async function precheck(ctx: DeployContext): Promise<void> {
-  await runCommand('nemoclaw', ['--version'], {
+  const version = await runCommand('nemoclaw', ['--version'], {
     dryRun: ctx.options.dryRun,
     timeoutMs: 10_000,
     description: '检查本机 nemoclaw CLI 是否可执行'
   });
+  if (!ctx.options.dryRun) assertMinimumVersion(version.stdout, MIN_NEMOCLAW_VERSION, 'NemoClaw');
 
   try {
-    await runCommand('nemoclaw', [ctx.sandboxName, 'status', '--json'], {
+    const status = await runCommand('nemoclaw', [ctx.sandboxName, 'status', '--json'], {
       dryRun: ctx.options.dryRun,
       timeoutMs: 30_000,
       description: '读取 sandbox 状态，确认 sandbox 已创建并运行'
     });
+    if (!ctx.options.dryRun) assertSandboxRunning(status.stdout);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(
@@ -24,6 +28,8 @@ export async function precheck(ctx: DeployContext): Promise<void> {
       ].join('\n')
     );
   }
+
+  await checkOpenClawRuntime(ctx.sandboxName, ctx.options.dryRun);
 
   try {
     await runCommand('nemoclaw', [ctx.sandboxName, 'exec', '--', 'openclaw', 'config', 'validate'], {

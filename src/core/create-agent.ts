@@ -46,7 +46,9 @@ export async function createAgent(ctx: DeployContext): Promise<void> {
         description: '创建后读取 agent 列表，使用 OpenClaw 返回的实际 workspace'
       }
     );
-    syncExistingAgentContext(ctx, createdListResult.stdout);
+    if (!syncExistingAgentContext(ctx, createdListResult.stdout)) {
+      throw new Error(`agents add 已返回成功，但 agents list 中未找到 ${ctx.agentName}`);
+    }
     return;
   } catch (createError) {
     const listResult = await runCommand(

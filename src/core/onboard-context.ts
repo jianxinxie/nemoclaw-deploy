@@ -5,6 +5,9 @@ import { z } from 'zod';
 import { readYamlFile } from '../utils/yaml.js';
 import { resolveFromBase } from '../utils/fs.js';
 import { validateOnboardSandboxName } from '../utils/validators.js';
+import { assertNoLegacySkillConfig } from '../utils/config-migration.js';
+import { MIN_NEMOCLAW_VERSION, NEMOCLAW_VERSION, isInstalledVersionLower } from '../utils/versions.js';
+import { resolveDashboardRemoteAccess } from './dashboard.js';
 
 export type OnboardMode = 'ensure' | 'resume' | 'fresh' | 'recreate';
 export type TriState = 'auto' | 'enabled' | 'disabled';
@@ -52,6 +55,7 @@ export interface OnboardContext {
       agentTimeout?: number;
     };
     services: {
+      dashboardRemoteAccess: boolean;
       openShellGatewayPort?: number;
       dashboardPort?: number;
       controlUiPort?: number;
@@ -134,6 +138,7 @@ const onboardConfigSchema = z.object({
         .optional(),
       services: z
         .object({
+          dashboardRemoteAccess: z.boolean().optional(),
           openShellGatewayPort: optionalPort,
           gatewayPort: optionalPort,
           dashboardPort: optionalPort,
@@ -166,6 +171,7 @@ export async function collectOnboardContext(options: BootstrapCliOptions): Promi
   const configPath = options.config ? path.resolve(options.config) : undefined;
   const baseDir = configPath ? path.dirname(configPath) : process.cwd();
   const raw = configPath ? await readYamlFile(configPath) : {};
+  assertNoLegacySkillConfig(raw);
   const parsed = onboardConfigSchema.safeParse(raw ?? {});
   if (!parsed.success) throw new Error(`onboard config 格式无效: ${parsed.error.message}`);
 
@@ -203,7 +209,12 @@ export async function collectOnboardContext(options: BootstrapCliOptions): Promi
     throw new Error('onboard.policy.mode=custom 时 presets 至少需要一个值');
   }
 
+  const hostGpu = config.onboard?.gpu?.host ?? 'auto';
   const sandboxGpu = config.onboard?.gpu?.sandbox ?? 'auto';
+  if ((hostGpu === 'disabled' && sandboxGpu === 'enabled') ||
+      (hostGpu === 'enabled' && sandboxGpu === 'disabled')) {
+    throw new Error('onboard.gpu.host 与 onboard.gpu.sandbox 不能分别设置为 enabled 和 disabled；这会生成 NemoClaw 不允许同时使用的 GPU 参数。');
+  }
   const gpuDevice = validateOptionalSimpleValue('onboard.gpu.device', normalize(config.onboard?.gpu?.device));
   if (gpuDevice && sandboxGpu !== 'enabled') {
     throw new Error('onboard.gpu.device 需要同时设置 onboard.gpu.sandbox: enabled');
@@ -224,7 +235,7 @@ export async function collectOnboardContext(options: BootstrapCliOptions): Promi
     install: {
       enabled: config.install?.enabled ?? true,
       mode: config.install?.mode ?? 'if-missing',
-      version: validateInstallVersion(normalize(config.install?.version) ?? 'v0.0.75')
+      version: validateInstallVersion(normalize(config.install?.version) ?? NEMOCLAW_VERSION)
     },
     onboard: {
       mode: config.onboard?.mode ?? 'ensure',
@@ -248,7 +259,7 @@ export async function collectOnboardContext(options: BootstrapCliOptions): Promi
         )
       },
       gpu: {
-        host: config.onboard?.gpu?.host ?? 'auto',
+        host: hostGpu,
         sandbox: sandboxGpu,
         device: gpuDevice
       },
@@ -262,7 +273,10 @@ export async function collectOnboardContext(options: BootstrapCliOptions): Promi
         webSearchProvider: config.onboard?.openclaw?.webSearchProvider ?? 'none',
         agentTimeout: nullable(config.onboard?.openclaw?.agentTimeout)
       },
-      services: servicePorts,
+      services: {
+        ...servicePorts,
+        dashboardRemoteAccess: resolveDashboardRemoteAccess(config.onboard ?? {})
+      },
       timeouts: {
         ollamaPull: nullable(config.onboard?.timeouts?.ollamaPull),
         localInference: nullable(config.onboard?.timeouts?.localInference),
@@ -354,6 +368,9 @@ function validateInstallVersion(value: string): string {
   if (version.startsWith('-') || /[\0\r\n\s]/.test(version)) {
     throw new Error('install.version 不能以 - 开头，且不能包含空白或控制字符');
   }
+  if (isInstalledVersionLower(version, MIN_NEMOCLAW_VERSION)) {
+    throw new Error(`install.version 需要 >= ${MIN_NEMOCLAW_VERSION}，请更新旧的安装配置。`);
+  }
   return version;
 }
 
@@ -410,7 +427,7 @@ function validateOpenShellGatewayPort(value?: number): number | undefined {
   return value;
 }
 
-function validateDistinctServicePorts(ports: OnboardContext['onboard']['services']): void {
+function validateDistinctServicePorts(ports: Omit<OnboardContext['onboard']['services'], 'dashboardRemoteAccess'>): void {
   const seen = new Map<number, string>();
   for (const [name, value] of Object.entries(ports)) {
     if (value === undefined) continue;

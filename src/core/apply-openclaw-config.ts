@@ -3,6 +3,7 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import type { DeployContext } from './context.js';
 import type { PrepareChannelServerResult } from './configure-channel.js';
+import { verifyAdvbotChannelSupported } from './configure-channel.js';
 import type { InstallPluginsResult, PluginConfigPlan } from './install-plugins.js';
 import { remoteTempBase } from './upload-agent-content.js';
 import { runCommand } from '../utils/run.js';
@@ -41,14 +42,12 @@ export async function applyOpenClawConfig(
   options: ApplyOpenClawConfigOptions
 ): Promise<ApplyOpenClawConfigResult> {
   const ctx = options.contexts[0];
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nemoclaw-deploy-openclaw-'));
-  const applyScript = path.join(tempDir, 'apply-openclaw-config.mjs');
-  const rollbackScript = path.join(tempDir, 'rollback-openclaw-config.mjs');
   const remoteDir = `${remoteTempBase(ctx)}/openclaw-config`;
   const remoteApplyScript = `${remoteDir}/apply-openclaw-config.mjs`;
   const remoteRollbackScript = `${remoteDir}/rollback-openclaw-config.mjs`;
   const remotePartial = `${remoteDir}/openclaw.partial.json`;
   const backupPath = `${remoteDir}/openclaw.json.before-deploy`;
+  const expectedPath = `${remoteDir}/openclaw.json.expected`;
 
   const partialFile = ctx.openclawConfig.enabled
     ? await validateOpenClawPartialFile(requireValue(ctx.openclawConfig.file, 'openclawConfig.file'))
@@ -59,6 +58,9 @@ export async function applyOpenClawConfig(
       .filter((agent) => Boolean(agent.model))
       .map((agent) => [agent.agentName, agent.model as string])
   );
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nemoclaw-deploy-openclaw-'));
+  const applyScript = path.join(tempDir, 'apply-openclaw-config.mjs');
+  const rollbackScript = path.join(tempDir, 'rollback-openclaw-config.mjs');
 
   try {
     await fs.writeFile(applyScript, APPLY_OPENCLAW_CONFIG_SCRIPT, 'utf8');
@@ -105,6 +107,7 @@ export async function applyOpenClawConfig(
         'env',
         `PARTIAL_FILE=${partialFile ? remotePartial : ''}`,
         `BACKUP_FILE=${backupPath}`,
+        `EXPECTED_FILE=${expectedPath}`,
         `MANAGED_PLAN_JSON=${JSON.stringify(managedPlan)}`,
         `AGENT_MODELS_JSON=${JSON.stringify(agentModels)}`,
         'node',
@@ -115,7 +118,7 @@ export async function applyOpenClawConfig(
         sensitive: true,
         timeoutMs: 30_000,
         description: '一次性合并并原子写入 /sandbox/.openclaw/openclaw.json',
-        displayCommand: `nemoclaw ${ctx.sandboxName} exec -- env PARTIAL_FILE=${partialFile ? remotePartial : ''} BACKUP_FILE=${backupPath} MANAGED_PLAN_JSON=****** AGENT_MODELS_JSON=****** node ${remoteApplyScript}`
+        displayCommand: `nemoclaw ${ctx.sandboxName} exec -- env PARTIAL_FILE=${partialFile ? remotePartial : ''} BACKUP_FILE=${backupPath} EXPECTED_FILE=${expectedPath} MANAGED_PLAN_JSON=****** AGENT_MODELS_JSON=****** node ${remoteApplyScript}`
       }
     );
 
@@ -130,6 +133,8 @@ export async function applyOpenClawConfig(
           description: '验证统一写入后的 OpenClaw 配置'
         }
       );
+      await verifyOpenClawConfig(ctx);
+      await verifyAdvbotChannelSupported(ctx);
     } catch (error) {
       if (changed) {
         await rollbackOpenClawConfig(ctx, remoteRollbackScript, backupPath);
@@ -146,11 +151,30 @@ export async function applyOpenClawConfig(
   }
 }
 
+export async function verifyOpenClawConfig(ctx: DeployContext): Promise<void> {
+  const remoteDir = `${remoteTempBase(ctx)}/openclaw-config`;
+  await runCommand(
+    'nemoclaw',
+    [ctx.sandboxName, 'exec', '--', 'env', 'VERIFY_ONLY=1',
+      `EXPECTED_FILE=${remoteDir}/openclaw.json.expected`,
+      'node', `${remoteDir}/apply-openclaw-config.mjs`],
+    {
+      dryRun: ctx.options.dryRun,
+      sensitive: true,
+      timeoutMs: 30_000,
+      description: '重新读取 OpenClaw 配置，确认 partial JSON、agent model 和 advbot channel 已完整保存'
+    }
+  );
+}
+
 function buildManagedPlan(
   ctx: DeployContext,
   pluginPlan: PluginConfigPlan | undefined,
   channelServer: PrepareChannelServerResult
 ): Record<string, unknown> {
+  if (ctx.channelServer.enabled && !channelServer.config) {
+    throw new Error('ChannelServer 已启用，但未生成 advbot channel 配置，无法提交 OpenClaw 配置');
+  }
   const plugins: PluginConfigPlan = pluginPlan
     ? {
         ids: [...pluginPlan.ids],
@@ -197,9 +221,11 @@ async function rollbackOpenClawConfig(
 function parseChanged(stdout: string, dryRun: boolean): boolean {
   if (dryRun) return true;
   try {
-    return (JSON.parse(stdout) as { changed?: unknown }).changed === true;
+    const result = JSON.parse(stdout) as { changed?: unknown };
+    if (typeof result.changed !== 'boolean') throw new Error('missing changed');
+    return result.changed;
   } catch {
-    throw new Error(`无法解析 OpenClaw 配置事务结果: ${stdout}`);
+    throw new Error('无法解析 OpenClaw 配置事务结果：未收到有效的 changed 状态');
   }
 }
 
@@ -226,8 +252,22 @@ function requireValue(value: string | undefined, label: string): string {
 const APPLY_OPENCLAW_CONFIG_SCRIPT = `
 import fs from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 const configPath = '/sandbox/.openclaw/openclaw.json';
+const expectedFile = process.env.EXPECTED_FILE;
+if (!expectedFile) throw new Error('EXPECTED_FILE is required');
+
+if (process.env.VERIFY_ONLY === '1') {
+  const actual = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  const expected = JSON.parse(fs.readFileSync(expectedFile, 'utf8'));
+  if (!isDeepStrictEqual(actual, expected)) {
+    throw new Error('OpenClaw config read-back mismatch: partial JSON or managed configuration was not preserved');
+  }
+  process.stdout.write(JSON.stringify({ verified: true }));
+  process.exit(0);
+}
+
 const partialFile = process.env.PARTIAL_FILE || '';
 const backupFile = process.env.BACKUP_FILE;
 const managed = JSON.parse(process.env.MANAGED_PLAN_JSON || '{}');
@@ -294,6 +334,17 @@ if ((pluginPlan.ids || []).length > 0 || Object.keys(pluginPlan.aliases || {}).l
   }
 
   for (const id of pluginPlan.ids || []) {
+    if (next.plugins.enabled === false) {
+      throw new Error('plugins.enabled=false prevents enabling plugin: ' + id);
+    }
+    if (Array.isArray(next.plugins.deny) && next.plugins.deny.includes(id)) {
+      throw new Error('plugins.deny explicitly blocks requested plugin: ' + id);
+    }
+    // Extend an existing restriction without disabling unrelated plugins on an
+    // unrestricted host by introducing a new global allowlist.
+    if (Array.isArray(next.plugins.allow) && next.plugins.allow.length > 0) {
+      next.plugins.allow = [...new Set([...next.plugins.allow, id])];
+    }
     const entry = isPlainObject(next.plugins.entries[id]) ? next.plugins.entries[id] : {};
     next.plugins.entries[id] = {
       ...entry,
@@ -331,6 +382,7 @@ if (modelEntries.length > 0) {
 
 const nextText = JSON.stringify(next, null, 2) + '\\n';
 const changed = JSON.stringify(original) !== JSON.stringify(next);
+fs.writeFileSync(expectedFile, nextText, { mode: 0o600 });
 if (changed) {
   fs.mkdirSync(path.dirname(backupFile), { recursive: true });
   fs.copyFileSync(configPath, backupFile);

@@ -1,7 +1,8 @@
 import path from 'node:path';
 import fs from 'fs-extra';
 import { bootstrapCommand } from './bootstrap.js';
-import { deployCommand } from './deploy.js';
+import { deployCommand, validateDeployResources } from './deploy.js';
+import { collectDeployPlan } from '../core/context.js';
 
 export interface UpOptions {
   config?: string;
@@ -11,6 +12,10 @@ export interface UpOptions {
 
 export async function upCommand(options: UpOptions): Promise<void> {
   const config = await resolveConfigPath(options.config);
+  const plan = await collectDeployPlan({ ...options, config });
+  // Catch missing uploads, malformed skills and invalid policy before installing
+  // NemoClaw or creating a sandbox. Check again at deployment time for changes.
+  await validateDeployResources(plan);
 
   const bootstrap = await bootstrapCommand({
     config,
@@ -23,7 +28,7 @@ export async function upCommand(options: UpOptions): Promise<void> {
     config,
     nonInteractive: options.nonInteractive,
     dryRun: options.dryRun
-  });
+  }, plan);
 }
 
 async function resolveConfigPath(

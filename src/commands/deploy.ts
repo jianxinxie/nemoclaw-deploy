@@ -5,18 +5,16 @@ import { precheck } from '../core/precheck.js';
 import { createAgent } from '../core/create-agent.js';
 import { uploadAgentContent } from '../core/upload-agent-content.js';
 import { uploadSandboxFiles } from '../core/copy-files.js';
-import { installSkill } from '../core/install-skill.js';
-import { installPlugins, verifyPluginsEnabled } from '../core/install-plugins.js';
-import {
-  prepareChannelServer,
-  verifyAdvbotChannelSupported
-} from '../core/configure-channel.js';
+import { collectWorkspaceSkills, type WorkspaceSkill } from '../core/workspace-skills.js';
+import { installPlugins, verifyPluginsEnabled, validatePluginSources } from '../core/install-plugins.js';
+import { prepareChannelServer } from '../core/configure-channel.js';
 import {
   applyOpenClawConfig,
-  validateOpenClawPartialFile
+  validateOpenClawPartialFile,
+  verifyOpenClawConfig
 } from '../core/apply-openclaw-config.js';
 import { restartGateway, type RestartGatewayResult } from '../core/restart-gateway.js';
-import { applyPolicy } from '../core/apply-policy.js';
+import { applyPolicy, validateNetworkPolicies } from '../core/apply-policy.js';
 import { configureEnv } from '../core/configure-env.js';
 import { executeSandboxCommands } from '../core/install-dependencies.js';
 import {
@@ -28,7 +26,8 @@ import {
 import { verifyDeployment } from '../core/verify.js';
 import { logger } from '../utils/logger.js';
 import { maskSecret } from '../utils/mask.js';
-import { runCommand } from '../utils/run.js';
+import { runCommand, withCommandEnvironment } from '../utils/run.js';
+import { dashboardEnvironment, dashboardBindLabel } from '../core/dashboard.js';
 import {
   validateAgentContentDir,
   validateHostFileOrDirectory
@@ -40,7 +39,7 @@ interface AgentDeploySummary {
   model?: string;
   agentContent: 'skipped' | 'applied';
   fileCopies: { status: 'skipped' | 'uploaded'; count: number };
-  skill: { status: 'skipped' | 'installed'; count: number };
+  skills: WorkspaceSkill[];
   env: { status: 'skipped' | 'configured'; targetFile?: string; count: number };
   dependencies: { status: 'skipped' | 'executed' | 'partial'; count: number };
   channelRegistration: RegisterAgentResult;
@@ -59,8 +58,13 @@ interface DeploySummary {
   gatewayRestart: RestartGatewayResult;
 }
 
-export async function deployCommand(options: DeployCliOptions): Promise<boolean> {
-  const plan = await collectDeployPlan(options);
+export async function deployCommand(options: DeployCliOptions, preparedPlan?: DeployPlan): Promise<boolean> {
+  const plan = preparedPlan ?? await collectDeployPlan(options);
+  return withCommandEnvironment(dashboardEnvironment(plan.dashboardRemoteAccess),
+    () => executeDeploy(options, plan));
+}
+
+async function executeDeploy(options: DeployCliOptions, plan: DeployPlan): Promise<boolean> {
   printPlan(plan);
 
   if (options.dryRun) {
@@ -76,17 +80,17 @@ export async function deployCommand(options: DeployCliOptions): Promise<boolean>
     }
   }
 
-  await Promise.all(plan.agents.map(validateRuntimeResources));
+  const workspaceSkills = await validateDeployResources(plan);
 
   const shared = plan.agents[0];
   const summary: DeploySummary = {
-    agents: plan.agents.map((ctx) => ({
+    agents: plan.agents.map((ctx, index) => ({
       name: ctx.agentName,
       workspace: ctx.workspace,
       model: ctx.model,
       agentContent: 'skipped',
       fileCopies: { status: 'skipped', count: 0 },
-      skill: { status: 'skipped', count: 0 },
+      skills: workspaceSkills[index],
       env: { status: 'skipped', count: 0 },
       dependencies: { status: 'skipped', count: 0 },
       channelRegistration: 'skipped'
@@ -98,10 +102,17 @@ export async function deployCommand(options: DeployCliOptions): Promise<boolean>
     gatewayRestart: 'skipped'
   };
   let cleanupCompleted = false;
+  let remoteTempUsed = false;
 
   try {
     logger.step('执行 sandbox 预检查...');
     await precheck(shared);
+
+    // Plugins and channel setup may require these endpoints. Apply policies
+    // before any agent changes so an earlier deploy failure cannot skip them.
+    logger.step('应用 sandbox 共享 network policies（agent、插件和 channel 配置之前）...');
+    summary.networkPolicy = await applyPolicy(shared);
+
     await precheckAgentRegistration(plan.agents);
 
     logger.step(`创建或确认 ${plan.agents.length} 个 agent...`);
@@ -112,6 +123,7 @@ export async function deployCommand(options: DeployCliOptions): Promise<boolean>
     assertResolvedWorkspaces(plan.agents);
 
     logger.step('处理各 agent 初始化内容...');
+    remoteTempUsed = true;
     for (const [index, ctx] of plan.agents.entries()) {
       logger.info(`处理 agent ${ctx.agentName} 的 workspace 初始化内容。`);
       summary.agents[index].agentContent = await uploadAgentContent(ctx);
@@ -120,12 +132,6 @@ export async function deployCommand(options: DeployCliOptions): Promise<boolean>
     logger.step('执行各 agent 的 sandbox 文件/目录上传...');
     for (const [index, ctx] of plan.agents.entries()) {
       summary.agents[index].fileCopies = await uploadSandboxFiles(ctx);
-    }
-
-    logger.step('安装各 agent skills...');
-    for (const [index, ctx] of plan.agents.entries()) {
-      logger.info(`安装 agent ${ctx.agentName} 的 skills。`);
-      summary.agents[index].skill = await installSkill(ctx);
     }
 
     logger.step('安装 sandbox 共享 OpenClaw 插件...');
@@ -142,10 +148,6 @@ export async function deployCommand(options: DeployCliOptions): Promise<boolean>
       channelServer: summary.channelServer
     });
     await verifyPluginsEnabled(shared);
-    await verifyAdvbotChannelSupported(shared);
-
-    logger.step('应用 sandbox 共享 network policies...');
-    summary.networkPolicy = await applyPolicy(shared);
 
     logger.step('配置各 agent env...');
     for (const [index, ctx] of plan.agents.entries()) {
@@ -156,14 +158,6 @@ export async function deployCommand(options: DeployCliOptions): Promise<boolean>
     for (const [index, ctx] of plan.agents.entries()) {
       summary.agents[index].dependencies = await executeSandboxCommands(ctx);
     }
-
-    logger.step('执行所有 agent 的基础验证...');
-    for (const ctx of plan.agents) {
-      await verifyDeployment(ctx, { policyApplied: summary.networkPolicy.status === 'applied' });
-    }
-
-    await cleanupAllRemoteTemp(plan.agents);
-    cleanupCompleted = true;
 
     if (shared.options.restartGateway) {
       logger.step('重启 OpenClaw 网关...');
@@ -181,15 +175,27 @@ export async function deployCommand(options: DeployCliOptions): Promise<boolean>
       );
     }
 
+    logger.step('验证最终 OpenClaw 配置、agent、sandbox 和 workspace skills...');
+    await verifyOpenClawConfig(shared);
+    await verifyPluginsEnabled(shared);
+    for (const [index, ctx] of plan.agents.entries()) {
+      await verifyDeployment(ctx, {
+        policyApplied: summary.networkPolicy.status === 'applied',
+        skills: summary.agents[index].skills
+      });
+    }
+
     logger.step('向 channel server 注册已启用的 agents...');
     for (const [index, ctx] of plan.agents.entries()) {
       summary.agents[index].channelRegistration = await registerAgent(ctx);
     }
 
+    await cleanupAllRemoteTemp(plan.agents);
+    cleanupCompleted = true;
     printSummary(plan, summary);
     return true;
   } finally {
-    if (!cleanupCompleted) {
+    if (remoteTempUsed && !cleanupCompleted) {
       logger.info('部署未完成，开始清理 sandbox 临时目录。');
       await cleanupAllRemoteTemp(plan.agents);
     }
@@ -215,7 +221,7 @@ function printPlan(plan: DeployPlan): void {
       ['Conflict Strategy', ctx.agentContent.enabled ? ctx.agentContent.conflictStrategy : '-'],
       ['Ignore', formatList(ctx.agentContent.ignore)],
       ['Sandbox Uploads', formatFileCopies(ctx)],
-      ['Skills', ctx.skill.enabled ? `enabled (${ctx.skill.hostDir ?? '-'})` : 'disabled'],
+      ['Skills', ctx.agentContent.enabled ? '随 agent content 上传到 workspace/skills，按 agent 验证' : '不上传'],
       [
         'Env',
         ctx.env.enabled
@@ -236,6 +242,7 @@ function printPlan(plan: DeployPlan): void {
   }
 
   printBlock('Sandbox 共享配置', [
+    ['Dashboard Bind', dashboardBindLabel(plan.dashboardRemoteAccess)],
     ['Plugins', shared.plugins.enabled ? `enabled (${shared.plugins.items.length})` : 'disabled'],
     ['Plugin Items', formatPluginItems(shared)],
     [
@@ -247,6 +254,8 @@ function printPlan(plan: DeployPlan): void {
     ['Gateway URL', shared.channelServer.enabled ? (shared.channelServer.gatewayUrl ?? 'auto from dashboard-url') : '-'],
     ['Gateway Token', formatGatewayToken(shared)],
     ['Network Policy', shared.networkPolicy.enabled ? `enabled (${shared.networkPolicy.dir ?? '-'})` : 'disabled'],
+    ['Policy Apply Order', shared.networkPolicy.enabled ? 'sandbox 预检查后，agent、插件和 channel 配置前' : '-'],
+    ['Trusted Private Hosts', formatList(shared.networkPolicy.trustedPrivateHosts)],
     ['Restart At End', shared.options.restartGateway ? 'enabled' : 'disabled']
   ]);
   logger.info('');
@@ -266,13 +275,14 @@ function printSummary(plan: DeployPlan, summary: DeploySummary): void {
       ['Model', agent.model ?? 'preserved'],
       ['Agent Content', agent.agentContent],
       ['Sandbox Uploads', `${agent.fileCopies.status}${agent.fileCopies.count ? ` (${agent.fileCopies.count})` : ''}`],
-      ['Skills', `${agent.skill.status}${agent.skill.count ? ` (${agent.skill.count})` : ''}`],
+      ['Skills', agent.skills.length ? `workspace verified (${agent.skills.length})` : 'none uploaded'],
       ['Env', formatEnvSummary(agent.env)],
       ['Sandbox Commands', formatDependenciesSummary(agent.dependencies)],
       ['Channel Registration', agent.channelRegistration]
     ]);
   }
   printBlock('Sandbox 共享结果', [
+    ['Dashboard Bind', dashboardBindLabel(plan.dashboardRemoteAccess)],
     ['Plugins', `${summary.plugins.status}${summary.plugins.status === 'configured' ? ` (installed ${summary.plugins.installed}, enabled ${summary.plugins.enabled})` : ''}`],
     ['OpenClaw Config', summary.openclawConfig.status],
     ['ChannelServer', formatChannelServerSummary(shared, summary)],
@@ -286,13 +296,17 @@ function printSummary(plan: DeployPlan, summary: DeploySummary): void {
       ['Gateway Token', maskSecret(shared.channelServer.gatewayToken)]
     ]);
   }
-  printBlock('验证', [['Doctor', `nemoclaw-deploy doctor --sandbox ${plan.sandboxName}`]]);
+  const dashboardEnv = `NEMOCLAW_DASHBOARD_BIND=${plan.dashboardRemoteAccess ? '0.0.0.0' : "''"}`;
+  printBlock('验证', [
+    ['Doctor', `${dashboardEnv} nemoclaw-deploy doctor --sandbox ${plan.sandboxName}`],
+    ['Connect', `${dashboardEnv} nemoclaw ${plan.sandboxName} connect`]
+  ]);
 }
 
 function formatPluginItems(ctx: DeployContext): string {
   if (!ctx.plugins.enabled || ctx.plugins.items.length === 0) return '-';
   return ctx.plugins.items
-    .map((item) => `${item.id} <- ${item.source ?? 'already installed'}${item.force ? ' (force)' : ''}`)
+    .map((item) => `${item.id} <- ${item.source ?? 'already installed'}${item.force ? ' (force)' : ''}${item.trustSource ? ' (trust source)' : ''}${item.acceptCapabilities ? ' (accept capabilities)' : ''}${item.acknowledgeInstallPolicyWarning ? ' (acknowledge policy warnings)' : ''}`)
     .join(', ');
 }
 
@@ -387,7 +401,14 @@ function assertResolvedWorkspaces(contexts: DeployContext[]): void {
   }
 }
 
-async function validateRuntimeResources(ctx: DeployContext): Promise<void> {
+export async function validateDeployResources(plan: DeployPlan): Promise<WorkspaceSkill[][]> {
+  await validatePluginSources(plan.agents[0]);
+  const workspaceSkills = await Promise.all(plan.agents.map(validateRuntimeResources));
+  await validateNetworkPolicies(plan.agents[0]);
+  return workspaceSkills;
+}
+
+async function validateRuntimeResources(ctx: DeployContext): Promise<WorkspaceSkill[]> {
   if (ctx.agentContent.enabled && ctx.agentContent.hostDir) {
     ctx.agentContent.hostDir = await validateAgentContentDir(ctx.agentContent.hostDir);
   }
@@ -399,6 +420,9 @@ async function validateRuntimeResources(ctx: DeployContext): Promise<void> {
   if (ctx.openclawConfig.enabled && ctx.openclawConfig.file) {
     ctx.openclawConfig.file = await validateOpenClawPartialFile(ctx.openclawConfig.file);
   }
+  return ctx.agentContent.enabled && ctx.agentContent.hostDir
+    ? collectWorkspaceSkills(ctx.agentContent.hostDir, ctx.agentContent.ignore)
+    : [];
 }
 
 async function cleanupAllRemoteTemp(contexts: DeployContext[]): Promise<void> {

@@ -1,6 +1,6 @@
 {
   "name": "@advantech-axa/nemoclaw-deploy",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "Install and onboard NemoClaw, then safely deploy one or more OpenClaw agents.",
   "type": "module",
   "bin": {
@@ -16,10 +16,16 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:compat": "npm run build && node --test test/nemoclaw-compat.test.mjs",
+    "bundle:iems": "npm run build && node scripts/build-iems-bundle.mjs",
+    "test:bundle": "node test/bundle-smoke.mjs",
+    "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "preinstall": "node bin/check-node-version.cjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "dependencies": {
     "@inquirer/prompts": "^7.8.0",

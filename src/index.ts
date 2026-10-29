@@ -6,6 +6,7 @@ import { initConfigCommand } from './commands/init-config.js';
 import { bootstrapCommand } from './commands/bootstrap.js';
 import { upCommand } from './commands/up.js';
 import { logger } from './utils/logger.js';
+import { assertMinimumVersion, MIN_NODE_VERSION } from './utils/versions.js';
 
 const packageMetadata = createRequire(import.meta.url)('../package.json') as { version: string };
 const program = new Command();
@@ -77,6 +78,7 @@ function withGlobalOptions<T extends Record<string, unknown>>(options: T, comman
 
 async function runAction(action: () => Promise<void>): Promise<void> {
   try {
+    assertMinimumVersion(process.versions.node, MIN_NODE_VERSION, 'Node.js');
     await action();
   } catch (error) {
     logger.error(error instanceof Error ? error.message : String(error));

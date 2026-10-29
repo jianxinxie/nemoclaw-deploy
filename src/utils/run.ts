@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { execa } from 'execa';
 import { logger } from './logger.js';
 import { maskSensitiveText } from './mask.js';
@@ -5,6 +6,8 @@ import { maskSensitiveText } from './mask.js';
 export interface RunCommandOptions {
   dryRun?: boolean;
   sensitive?: boolean;
+  /** Preserve machine-readable output in memory; logs and errors remain masked. */
+  rawOutput?: boolean;
   env?: Record<string, string>;
   timeoutMs?: number;
   logCommand?: boolean;
@@ -30,13 +33,21 @@ export interface RunCommandResult {
   exitCode: number;
 }
 
+const commandEnvironment = new AsyncLocalStorage<Record<string, string>>();
+
+/** Keep host command settings scoped to one operation, including cleanup. */
+export function withCommandEnvironment<T>(env: Record<string, string>, action: () => T): T {
+  return commandEnvironment.run({ ...commandEnvironment.getStore(), ...env }, action);
+}
+
 export async function runCommand(
   command: string,
   args: string[],
   options: RunCommandOptions = {}
 ): Promise<RunCommandResult> {
-  const secrets = collectSecrets(args, options.env);
-  const display = options.displayCommand ?? formatCommand(command, args, secrets);
+  const env = { ...commandEnvironment.getStore(), ...options.env };
+  const secrets = collectSecrets(args, env);
+  const display = maskSensitiveText(options.displayCommand ?? formatCommand(command, args, secrets), secrets);
 
   if (options.dryRun) {
     logger.info(`[dry-run] ${display}`);
@@ -62,7 +73,7 @@ export async function runCommand(
           ...process.env,
           NO_COLOR: '1',
           TERM: 'xterm-256color',
-          ...options.env
+          ...env
         }
       }) as unknown as { unref?: () => void };
 
@@ -82,13 +93,13 @@ export async function runCommand(
         ...process.env,
         NO_COLOR: '1',
         TERM: 'xterm-256color',
-        ...options.env
+        ...env
       }
     });
 
     const stdout = maskSensitiveText(typeof result.stdout === 'string' ? result.stdout : '', secrets);
     const stderr = maskSensitiveText(typeof result.stderr === 'string' ? result.stderr : '', secrets);
-    const exitCode = result.exitCode ?? 0;
+    const exitCode = result.exitCode;
     const timedOut = (result as { timedOut?: boolean }).timedOut ?? false;
 
     if (timedOut) {
@@ -99,7 +110,7 @@ export async function runCommand(
       throw new Error(
         [
           `命令执行失败: ${display}`,
-          `exitCode: ${exitCode}`,
+          `exitCode: ${exitCode ?? 'unknown'}${result.signal ? ` (signal: ${result.signal})` : ''}`,
           stderr ? `stderr: ${stderr}` : '',
           stdout ? `stdout: ${stdout}` : ''
         ]
@@ -108,7 +119,11 @@ export async function runCommand(
       );
     }
 
-    return { stdout, stderr, exitCode };
+    return {
+      stdout: options.rawOutput && typeof result.stdout === 'string' ? result.stdout : stdout,
+      stderr: options.rawOutput && typeof result.stderr === 'string' ? result.stderr : stderr,
+      exitCode
+    };
   } catch (error) {
     if (error instanceof Error) {
       if ((error as { timedOut?: boolean }).timedOut) {
