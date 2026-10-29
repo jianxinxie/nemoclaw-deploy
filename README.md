@@ -202,7 +202,7 @@ chmod +x install-and-up.sh
 nemoclaw-deploy up --config onboard.yaml
 ```
 
-存在随包 CLI 时，脚本按 SHA256 复用本地安装，同版本修复也能自动更新；没有随包 CLI 时，优先复用脚本专用 prefix，然后检查 PATH 中版本 >=0.0.9 的 CLI。安装失败保留旧 CLI。需要显式重新安装时使用：
+存在随包 CLI 时，脚本按 SHA256 复用本地安装，同版本修复也能自动更新；没有随包 CLI 时，优先复用脚本专用 prefix，然后检查 PATH 中版本 >=0.0.10 的 CLI。安装失败保留旧 CLI。需要显式重新安装时使用：
 
 ```bash
 FORCE_CLI_INSTALL=1 ./install-and-up.sh

@@ -128,10 +128,10 @@ IEMS 业务部署目录单独提供，不随 CLI 源码仓库提交。将其放�
 npm ci
 npm test
 npm pack
-PACKAGE_SPEC="$(pwd)/advantech-axa-nemoclaw-deploy-0.0.9.tgz" bash iems/install.sh
+PACKAGE_SPEC="$(pwd)/advantech-axa-nemoclaw-deploy-0.0.10.tgz" bash iems/install.sh
 ```
 
-已安装 CLI >=0.0.9 后预览：
+已安装 CLI >=0.0.10 后预览：
 
 ```bash
 bash iems/install.sh --non-interactive --dry-run
@@ -251,7 +251,7 @@ nemoclaw-deploy up --config onboard.yaml --dry-run
 
 不传 `--config` 时使用当前目录下的 `onboard.yaml`。
 
-`templates/install-and-up.sh` 没有随包 CLI 时优先复用脚本 prefix，其次复用 PATH 中版本 >=0.0.9 的 CLI；有随包 CLI 时验证 `packages/SHA256SUMS` 并按包内容 hash 复用，自动识别同版本修复。安装使用独立目录和原子入口切换，失败保留旧版本；同一 prefix 通过 `flock` 防止并发安装。设置 `FORCE_CLI_INSTALL=1` 可强制重装，`PACKAGE_SPEC=/path/package.tgz` 和可选 `PACKAGE_SHA256` 可指定本地包。`NPM_OFFLINE=1` 禁止 npm 联网：IEMS CLI 已携带按锁文件安装的生产依赖，可无缓存安装；其他自定义包仍可能需要缓存。
+`templates/install-and-up.sh` 没有随包 CLI 时优先复用脚本 prefix，其次复用 PATH 中版本 >=0.0.10 的 CLI；有随包 CLI 时验证 `packages/SHA256SUMS` 并按包内容 hash 复用，自动识别同版本修复。安装使用独立目录和原子入口切换，失败保留旧版本；同一 prefix 通过 `flock` 防止并发安装。设置 `FORCE_CLI_INSTALL=1` 可强制重装，`PACKAGE_SPEC=/path/package.tgz` 和可选 `PACKAGE_SHA256` 可指定本地包。`NPM_OFFLINE=1` 禁止 npm 联网：IEMS CLI 已携带按锁文件安装的生产依赖，可无缓存安装；其他自定义包仍可能需要缓存。
 
 `--prepare-only` 安装 Node.js/CLI 并校验完整计划，不安装 NemoClaw 或创建 sandbox；`--dry-run` 不安装任何依赖，需要已准备的 CLI。`--config` 在环境准备前解析，未知参数直接失败。`up` 会提前检查本地内容、skills、上传文件、OpenClaw partial 和 policy，避免在创建 sandbox 后才发现本地文件问题。
 

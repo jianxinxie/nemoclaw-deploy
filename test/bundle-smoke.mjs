@@ -17,6 +17,8 @@ try {
   const unzip = spawnSync('unzip', ['-q', archive, '-d', extracted], { encoding: 'utf8' });
   assert.equal(unzip.status, 0, unzip.stderr);
   const directory = path.join(extracted, 'iems');
+  const bundledPackages = (await fs.readdir(path.join(directory, 'packages'))).filter(name => name.endsWith('.tgz'));
+  assert.deepEqual(bundledPackages, ['advantech-axa-nemoclaw-deploy-' + metadata.version + '.tgz']);
   const config = path.join(root, 'custom config.yaml');
   await fs.writeFile(config, [
     'schemaVersion: 3', 'install: { enabled: false }',

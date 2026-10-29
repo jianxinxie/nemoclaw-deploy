@@ -37,7 +37,7 @@ eval(args[1]);
   await fs.writeFile(path.join(nodeBin, 'node'), fakeNode('22.23.0'), { mode: 0o755 });
   await fs.writeFile(path.join(bin, 'npm'), '#!/bin/sh\ncase "$1" in -v|--version) echo 11.0.0; exit 0 ;; esac\nexit 99\n', { mode: 0o755 });
   await fs.writeFile(path.join(bin, 'nemoclaw-deploy'), `#!/bin/sh
-if [ "$1" = --version ]; then echo 0.0.9; exit 0; fi
+if [ "$1" = --version ]; then echo 0.0.10; exit 0; fi
 printf '%s\\n' "$*" >> "$TEST_ROOT/up-calls"
 exit "\${TEST_UP_FAILURE:-0}"
 `, { mode: 0o755 });
@@ -95,7 +95,7 @@ nvm() {
   const addBundle = async (content = 'fixture package') => {
     const packages = path.join(root, 'packages');
     await fs.mkdir(packages, { recursive: true });
-    const filename = 'advantech-axa-nemoclaw-deploy-0.0.9.tgz';
+    const filename = 'advantech-axa-nemoclaw-deploy-0.0.10.tgz';
     await fs.writeFile(path.join(packages, filename), content);
     const hash = createHash('sha256').update(content).digest('hex');
     await fs.writeFile(path.join(packages, 'SHA256SUMS'), hash + '  ' + filename + '\n');
@@ -249,7 +249,7 @@ for (const script of installerScripts) {
   test(`${script}: corrupt bundled package fails before Node preparation or npm`, async t => {
     const f = await fixture(t, script, false);
     await f.addBundle();
-    await fs.appendFile(path.join(f.root, 'packages/advantech-axa-nemoclaw-deploy-0.0.9.tgz'), 'corrupt');
+    await fs.appendFile(path.join(f.root, 'packages/advantech-axa-nemoclaw-deploy-0.0.10.tgz'), 'corrupt');
     const result = f.run();
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.match(result.stderr, /SHA256 校验失败/);

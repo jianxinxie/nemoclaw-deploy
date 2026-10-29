@@ -757,7 +757,7 @@ test('shell dry-run rejects an old deploy CLI without installing packages', asyn
     encoding: 'utf8', timeout: 10_000
   });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /预先安装 nemoclaw-deploy >= 0.0.9/);
+  assert.match(result.stderr, /预先安装 nemoclaw-deploy >= 0.0.10/);
   await assert.rejects(fs.access(npmMarker));
   assert.deepEqual(await f.calls(), []);
 });

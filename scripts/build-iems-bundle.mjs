@@ -12,12 +12,14 @@ const archiveName = 'iems-install-' + metadata.version + '.zip';
 const excluded = new Set(['.nemoclaw-deploy', 'node_modules', '.git', '.cache', '__pycache__', '.DS_Store']);
 const hash = buffer => createHash('sha256').update(buffer).digest('hex');
 const staging = await fs.mkdtemp(path.join(repo, '.tmp-iems-bundle-'));
+const excludedPackageFiles = new Set();
 
 async function walk(directory, relative = '') {
   const files = [];
   for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
     if (excluded.has(entry.name) || (!relative && entry.name === 'SHA256SUMS')) continue;
     const name = path.posix.join(relative, entry.name);
+    if (excludedPackageFiles.has(name)) continue;
     if (entry.isDirectory()) files.push(...await walk(path.join(directory, entry.name), name));
     else if (entry.isFile()) files.push(name);
     else throw new Error('安装包不接受符号链接或特殊文件: ' + name);
@@ -77,6 +79,10 @@ try {
   await fs.mkdir(packages, { recursive: true });
   const packagePath = path.join(packages, info.filename);
   await replaceFile(path.join(staging, info.filename), packagePath, 0o644);
+  // Keep older local packages available without shipping them in this release.
+  for (const name of await fs.readdir(packages)) {
+    if (name.endsWith('.tgz') && name !== info.filename) excludedPackageFiles.add('packages/' + name);
+  }
   await fs.writeFile(path.join(packages, 'SHA256SUMS'), hash(await fs.readFile(packagePath)) + '  ' + info.filename + '\n');
   const sums = [];
   for (const file of await walk(root)) {
@@ -85,7 +91,8 @@ try {
   await fs.writeFile(path.join(root, 'SHA256SUMS'), sums.join('\n') + '\n');
   const stagedArchive = path.join(staging, archiveName);
   await runCommand('zip', ['-q', '-r', '-X', stagedArchive, 'iems', '-x',
-    ...Array.from(excluded, name => '*/' + name + '/*'), '*/.DS_Store'], { logCommand: false });
+    ...Array.from(excluded, name => '*/' + name + '/*'), '*/.DS_Store',
+    ...Array.from(excludedPackageFiles, name => 'iems/' + name)], { logCommand: false });
   const extracted = path.join(staging, 'check');
   await fs.mkdir(extracted);
   await runCommand('unzip', ['-q', stagedArchive, '-d', extracted], { logCommand: false });

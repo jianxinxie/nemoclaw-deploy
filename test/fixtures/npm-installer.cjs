@@ -7,7 +7,7 @@ const root = process.env.TEST_ROOT;
 fs.appendFileSync(path.join(root, 'npm-calls.jsonl'), JSON.stringify(args) + '\n');
 const prefix = args[args.indexOf('--prefix') + 1];
 fs.mkdirSync(path.join(prefix, 'bin'), { recursive: true });
-const version = process.env.TEST_NPM_CLI_VERSION || '0.0.9';
+const version = process.env.TEST_NPM_CLI_VERSION || '0.0.10';
 fs.writeFileSync(path.join(prefix, 'bin/nemoclaw-deploy'), [
   '#!/bin/sh',
   'if [ "$1" = --version ]; then echo ' + version + '; exit 0; fi',
