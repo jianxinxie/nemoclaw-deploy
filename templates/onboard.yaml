@@ -87,7 +87,7 @@ deploy:
       enabled: false
       file: ./openclaw.json
 
-    # ChannelServer 用于补充 advbot 动态 gateway 字段和注册 agents。
+    # ChannelServer 用于配置 advbot 账号及动态 gateway 连接字段。
     # 需要 sandbox 已安装 advbot，或启用上方 plugins 并确认相应安装选项。
     channelServer:
       enabled: true
@@ -153,14 +153,6 @@ deploy:
                 echo "requirements.txt not found, skip pip install";
               fi
           continueOnError: false
-
-      # 开启后调用 <deploy.shared.channelServer.url>/v1/openclaw/agents。
-      channelRegistration:
-        enabled: false
-        # 留空时默认使用 onboard.sandbox.name。
-        agentLabel: ""
-        # 注册接口不可用时是否继续部署；默认为 true。
-        continueOnError: true
 
       env:
         enabled: true

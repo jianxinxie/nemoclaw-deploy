@@ -7,10 +7,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 NODE_VERSION="${NODE_VERSION:-24}"
 REQUIRED_NODE_VERSION="${REQUIRED_NODE_VERSION:-22.19.0}"
-MIN_DEPLOY_CLI_VERSION="0.0.10"
+MIN_DEPLOY_CLI_VERSION="0.0.11"
 NVM_VERSION="${NVM_VERSION:-v0.40.3}"
 PACKAGE_NAME="${PACKAGE_NAME:-@advantech-axa/nemoclaw-deploy}"
-PACKAGE_VERSION="${PACKAGE_VERSION:-0.0.10}"
+PACKAGE_VERSION="${PACKAGE_VERSION:-0.0.11}"
 PACKAGE_SPEC="${PACKAGE_SPEC:-}"
 PACKAGE_SHA256="${PACKAGE_SHA256:-}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
@@ -243,13 +243,27 @@ publish_cli() {
     const fs = require("node:fs"), path = require("node:path");
     const [prefix, release, hash] = process.argv.slice(1);
     fs.writeFileSync(path.join(release, ".ready"), "verified\n");
-    const links = [[path.join(prefix, "bin/nemoclaw-deploy"), path.join(release, "bin/nemoclaw-deploy")]];
+    const links = [];
     if (hash) links.push([path.join(prefix, "releases", hash), release]);
-    for (const [dest, target] of links) {
+    // Publish the executable pointer last; preparation failures keep the old CLI selected.
+    links.push([path.join(prefix, "bin/nemoclaw-deploy"), path.join(release, "bin/nemoclaw-deploy")]);
+    for (const [dest] of links) {
       fs.mkdirSync(path.dirname(dest), {recursive:true});
-      const temp = dest + ".new-" + process.pid;
-      try { fs.symlinkSync(target, temp); fs.renameSync(temp, dest); }
-      finally { fs.rmSync(temp, {force:true}); }
+      const current = fs.lstatSync(dest, {throwIfNoEntry:false});
+      if (current && !current.isSymbolicLink() && !current.isFile()) {
+        throw new Error("CLI 发布目标必须是文件或符号链接: " + dest);
+      }
+    }
+    const staged = [];
+    try {
+      for (const [dest, target] of links) {
+        const temp = dest + ".new-" + process.pid;
+        fs.symlinkSync(target, temp);
+        staged.push([temp, dest]);
+      }
+      for (const [temp, dest] of staged) fs.renameSync(temp, dest);
+    } finally {
+      for (const [temp] of staged) fs.rmSync(temp, {force:true});
     }
   ' "$NPM_PREFIX" "$STAGED_PREFIX" "$BUNDLED_SHA256"
 }

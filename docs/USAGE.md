@@ -51,7 +51,7 @@ deploy:
 | `acceptCapabilities: true` | 明确接受插件声明的能力，安装时传入 `--accept-capabilities`。 |
 | `acknowledgeInstallPolicyWarning: true` | 明确确认安装策略的 `warn`，传入 `--acknowledge-install-policy-warning`；`block` 和策略执行失败仍终止。 |
 
-以上属性只接受布尔值且默认 `false`。例如，已经审查来源和能力的插件可同时设置 `trustSource: true`、`acceptCapabilities: true`；安装策略没有报 `warn` 时不需要开启 `acknowledgeInstallPolicyWarning`。这些确认只作用于安装调用；需要重装已存在插件时还应设置 `force: true`。CLI 不会自动确认能力或安装策略警告；上游错误保留，并提示对应配置项。
+以上属性只接受布尔值且默认 `false`。例如，已经审查来源和能力的插件可同时设置 `trustSource: true`、`acceptCapabilities: true`；安装策略没有报 `warn` 时不需要开启 `acknowledgeInstallPolicyWarning`。这些确认只作用于安装调用；需要重装已存在插件时还应设置 `force: true`。交互模式会展示上游原始提示，逐项询问来源、能力或策略警告，每项默认不确认，明确同意后才增加对应参数重试一次。非交互模式缺少确认时保留原始错误并提示配置项。网络错误、重复确认失败及策略 block 不会自动重试。
 
 启用插件时会把真实插件 ID 合并到已有的非空 `plugins.allow`，保留其他 ID；不会新建一个限制所有其他插件的 allowlist。`plugins.enabled: false` 和 `plugins.deny` 的显式禁止会报错，需先调整用户配置。安装来源提醒和 `plugins.allow is empty` 是不同问题；后者可按实际信任范围在 partial JSON 中显式配置 `plugins.allow`。重启后再次验证插件是否启用。
 
@@ -84,7 +84,7 @@ NEMOCLAW_COMPAT_SOURCE=/tmp/nemoclaw-v0.0.139 npm run test:compat
 
 独立 `deploy.agents[].skill` 配置已移除。将技能放到 `agentContent.hostDir/skills/<name>/SKILL.md`，每份说明包含合法 YAML frontmatter（`name`、`description`）。上传沿用 agent 内容的 ignore 和冲突策略。部署后使用 `openclaw skills list --agent <agent> --json` 检查技能来自该 agent 的 workspace，且依赖已满足。普通文件技能默认由 watcher 刷新；既有会话仍应确认技能已刷新，或使用新会话验证。
 
-配置变更后推荐设置 `deploy.shared.options.restartGateway: true`，所有 agent 处理完成后统一重启一次，再验证和注册。
+配置变更后推荐设置 `deploy.shared.options.restartGateway: true`，所有 agent 处理完成后统一重启一次，再验证最终配置和 agent 状态。
 
 私网 endpoint 需要显式信任，并且必须与策略中的 endpoint 精确匹配：
 
@@ -128,10 +128,10 @@ IEMS 业务部署目录单独提供，不随 CLI 源码仓库提交。将其放�
 npm ci
 npm test
 npm pack
-PACKAGE_SPEC="$(pwd)/advantech-axa-nemoclaw-deploy-0.0.10.tgz" bash iems/install.sh
+PACKAGE_SPEC="$(pwd)/advantech-axa-nemoclaw-deploy-0.0.11.tgz" bash iems/install.sh
 ```
 
-已安装 CLI >=0.0.10 后预览：
+已安装 CLI >=0.0.11 后预览：
 
 ```bash
 bash iems/install.sh --non-interactive --dry-run
@@ -251,7 +251,7 @@ nemoclaw-deploy up --config onboard.yaml --dry-run
 
 不传 `--config` 时使用当前目录下的 `onboard.yaml`。
 
-`templates/install-and-up.sh` 没有随包 CLI 时优先复用脚本 prefix，其次复用 PATH 中版本 >=0.0.10 的 CLI；有随包 CLI 时验证 `packages/SHA256SUMS` 并按包内容 hash 复用，自动识别同版本修复。安装使用独立目录和原子入口切换，失败保留旧版本；同一 prefix 通过 `flock` 防止并发安装。设置 `FORCE_CLI_INSTALL=1` 可强制重装，`PACKAGE_SPEC=/path/package.tgz` 和可选 `PACKAGE_SHA256` 可指定本地包。`NPM_OFFLINE=1` 禁止 npm 联网：IEMS CLI 已携带按锁文件安装的生产依赖，可无缓存安装；其他自定义包仍可能需要缓存。
+`templates/install-and-up.sh` 没有随包 CLI 时优先复用脚本 prefix，其次复用 PATH 中版本 >=0.0.11 的 CLI；有随包 CLI 时验证 `packages/SHA256SUMS` 并按包内容 hash 复用，自动识别同版本修复。安装使用独立目录和原子入口切换，失败保留旧版本；同一 prefix 通过 `flock` 防止并发安装。设置 `FORCE_CLI_INSTALL=1` 可强制重装，`PACKAGE_SPEC=/path/package.tgz` 和可选 `PACKAGE_SHA256` 可指定本地包。`NPM_OFFLINE=1` 禁止 npm 联网：IEMS CLI 已携带按锁文件安装的生产依赖，可无缓存安装；其他自定义包仍可能需要缓存。
 
 `--prepare-only` 安装 Node.js/CLI 并校验完整计划，不安装 NemoClaw 或创建 sandbox；`--dry-run` 不安装任何依赖，需要已准备的 CLI。`--config` 在环境准备前解析，未知参数直接失败。`up` 会提前检查本地内容、skills、上传文件、OpenClaw partial 和 policy，避免在创建 sandbox 后才发现本地文件问题。
 
@@ -349,11 +349,6 @@ deploy:
 
       # skills 放入 agentContent.hostDir 下的 skills/，与内容一起上传。
 
-      channelRegistration:
-        enabled: false
-        agentLabel: ""
-        continueOnError: true
-
       env:
         enabled: true
         directory: ""
@@ -363,6 +358,10 @@ deploy:
 ```
 
 `workspace: ""` 默认使用 `/sandbox/.openclaw/workspace/${agentName}`。如果 agent 已存在，CLI 会读取 OpenClaw 中的实际 workspace，并将后续上传、env 和命令操作切换到该路径。
+
+workspace 必须是 sandbox 绝对路径且不能是根目录。路径会先规范化，再检查多个 agent 是否使用同一 workspace，避免 `..` 或尾部斜杠造成同一路径被重复使用。无法解析 `agents list --json` 时会停止，错误文本中出现 agent 名称不会被视为 agent 已存在。
+
+安装前检查实际要上传的文件树：符号链接和特殊文件会报错，agent 内容按 ignore 过滤后仍须有可上传文件。被 ignore 排除的内容不参与检查。
 
 `env.directory` 规则：
 
@@ -455,7 +454,7 @@ partial 中适合配置 `models`、`channels`、`mcp`、`session`、`tools`、`c
 
 配置写入后会重新读取 sandbox 中的文件，核对 partial、插件、agent model 和 channel 是否完整保存；验证或 advbot 账号识别失败时回滚配置。全部操作和网关重启结束后还会再核对一次配置，若配置被其他命令修改或丢失，部署会明确报错，不会显示成功。临时核验文件仅保留在 sandbox，完成后清理。
 
-## ChannelServer 和 agent 注册
+## ChannelServer 和 advbot 配置
 
 ```yaml
 deploy:
@@ -464,28 +463,11 @@ deploy:
       enabled: true
       url: http://127.0.0.1:8086
       advbotAccountId: default
-
-  agents:
-    - name: my-agent
-      channelRegistration:
-        enabled: true
-        # 留空时默认使用 onboard.sandbox.name
-        agentLabel: ""
-        continueOnError: true
 ```
 
-注册请求为：
+ChannelServer 集成自动获取 gateway token 和 gateway URL，配置 `channels.advbot.accounts.<advbotAccountId>` 的连接字段。部署不向 channel server 发送 agent 注册请求，也不为注册流程检查 curl。
 
-```http
-POST <channelServer.url>/v1/openclaw/agents
-Content-Type: application/json
-
-{"agent_id":"my-agent","agent_label":"demo"}
-```
-
-`agentLabel` 留空时默认使用 `onboard.sandbox.name`。`continueOnError` 默认为 `true`：注册请求失败时记录 `failed-continued` 并完成部署。设为 `false` 时，curl 预检查或注册请求失败会立即终止部署。
-
-ChannelServer 集成还会自动获取 gateway token 和 gateway URL，只补充 `channels.advbot.accounts.<advbotAccountId>` 的动态连接字段。
+旧配置升级时请删除 `deploy.agents[].channelRegistration` 整段；该字段已移除，保留它会在 `up` / `deploy` 执行外部命令前触发配置校验错误。
 
 重复部署也会重新获取当前 gateway 信息，再检查已有账号是否匹配。动态字段优先于 partial 中的同名字段，避免旧 token 或旧 URL 被重新合并回来。核验使用 `openclaw channels list --all --json` 返回的实际账号列表，不会把插件日志中出现 `advbot` 当作配置成功。主机上的 partial 不会被修改或写入自动获取的 token。
 
@@ -498,7 +480,6 @@ ChannelServer 集成还会自动获取 gateway token 和 gateway URL，只补充
 - 不上传 skills 时，从 agent 内容中移除 skills/，或在 agentContent.ignore 中排除它。
 - `deploy.agents[].sandbox.uploads.enabled: false`
 - `deploy.agents[].sandbox.commands.enabled: false`
-- `deploy.agents[].channelRegistration.enabled: false`
 
 ## 安全提示
 

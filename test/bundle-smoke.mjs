@@ -29,7 +29,7 @@ try {
     '    options: { restartGateway: false }', '  agents:', '    - name: demo',
     '      agentContent: { enabled: false }', '      env: { enabled: false }',
     '      sandbox: { uploads: { enabled: false }, commands: { enabled: false } }',
-    '      channelRegistration: { enabled: false }', ''
+    ''
   ].join('\n'));
   const prefix = path.join(root, 'prefix with spaces');
   const run = args => {
@@ -112,9 +112,71 @@ try {
   assert.equal(merged.channels.advbot.accounts.ec.channelServerUrl, 'http://channel.example.com:8086');
   assert.equal(merged.channels.advbot.accounts.ec.gatewayToken, 'test-current-gateway-token-123456789');
   assert.equal(merged.channels.advbot.accounts.ec.gatewayUrl, 'wss://gateway.example.com:18791');
+  assert.doesNotMatch(deployment.stdout + deployment.stderr, /Channel Registration|\/v1\/openclaw\/agents|注册/);
   assert.doesNotMatch(deployment.stdout + deployment.stderr, /test-current-gateway-token-123456789|test-dashboard-secret/);
   assert.equal(calls.filter(args => args[1] === 'gateway').length, 1);
   const restart = calls.findIndex(args => args[1] === 'gateway');
   assert(calls.findLastIndex(args => args.includes('VERIFY_ONLY=1')) > restart);
+  // Run the packaged install.sh with the actual three-agent IEMS configuration.
+  // Only credentials and explicit non-interactive confirmations are replaced.
+  const fullConfig = parse(await fs.readFile(path.join(directory, 'onboard.yaml'), 'utf8'));
+  assert(fullConfig.deploy.agents.every(agent => !Object.hasOwn(agent, 'channelRegistration')));
+  fullConfig.onboard.inference.apiKey = 'full-smoke-secret';
+  fullConfig.onboard.options.acceptThirdPartySoftware = true;
+  for (const item of fullConfig.deploy.shared.plugins.items) {
+    item.force = false;
+    item.trustSource = true;
+    item.acceptCapabilities = true;
+    item.acknowledgeInstallPolicyWarning = true;
+  }
+  for (const agent of fullConfig.deploy.agents) {
+    if (agent.agentContent.enabled) agent.agentContent.conflictStrategy = 'backup';
+  }
+  const fullConfigPath = path.join(directory, 'full-smoke.yaml');
+  await fs.writeFile(fullConfigPath, stringify(fullConfig), { mode: 0o600 });
+  // Native /sandbox paths contain no spaces; keep their host mapping equivalent.
+  // The extracted package and npm prefix above still exercise paths with spaces.
+  const fullRoot = path.join(root, 'full-sandbox-transport');
+  const fullBin = path.join(fullRoot, 'bin');
+  await fs.mkdir(fullBin, { recursive: true });
+  await fs.writeFile(path.join(fullRoot, 'openclaw.json'), '{}');
+  await fs.writeFile(path.join(fullBin, 'nemoclaw'), fixture, { mode: 0o755 });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const full = spawnSync('bash', [path.join(directory, 'install.sh'), '--config', fullConfigPath, '--non-interactive'], {
+      encoding: 'utf8', timeout: 90_000,
+      env: { ...process.env, NPM_PREFIX: prefix, PACKAGE_SPEC: '', PACKAGE_SHA256: '',
+        PACKAGE_NAME: metadata.name, PACKAGE_VERSION: metadata.version, FORCE_CLI_INSTALL: '0',
+        PATH: `${fullBin}${path.delimiter}${process.env.PATH}`, TEST_ROOT: fullRoot,
+        TEST_NATIVE_PATHS: '1', TEST_REQUIRE_ONBOARD: '1', TEST_PLUGIN_CAPABILITIES: '1',
+        TEST_PLUGIN_POLICY_WARNING: '1', TEST_NEST_UPLOAD: '1' }
+    });
+    assert.equal(full.status, 0, full.stdout + full.stderr);
+    assert.match(full.stdout, /部署完成/);
+    assert.doesNotMatch(full.stdout + full.stderr, /full-smoke-secret|test-current-gateway-token-123456789|Channel Registration/);
+  }
+  const fullCalls = (await fs.readFile(path.join(fullRoot, 'calls.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(fullCalls.filter(args => args[0] === 'onboard').length, 1);
+  assert.equal(fullCalls.filter(args => args[1] === 'agents' && args[2] === 'add').length, 3);
+  assert.equal(fullCalls.filter(args => args[1] === 'exec' && args[4] === 'plugins' && args[5] === 'install').length, 1);
+  assert.equal(fullCalls.filter(args => args[1] === 'gateway').length, 2);
+  const liveAgents = JSON.parse(await fs.readFile(path.join(fullRoot, 'agents.json'), 'utf8'));
+  assert.equal(liveAgents.length, 3);
+  for (const agent of fullConfig.deploy.agents) {
+    const workspace = path.join(fullRoot, 'sandbox', agent.workspace.slice('/sandbox'.length));
+    if (agent.agentContent.enabled) {
+      assert.equal((await fs.readdir(path.join(workspace, 'skills'))).length, 12);
+      assert((await fs.readdir(workspace)).some(name => /\.bak\./.test(name)));
+    } else await assert.rejects(fs.access(path.join(workspace, 'AGENTS.md')), { code: 'ENOENT' });
+    if (agent.env.enabled) assert((await fs.readFile(path.join(workspace, '.env'), 'utf8')).includes('EXTRACT_SERVICE_URL='));
+  }
+  const executable = path.join(fullRoot, 'sandbox/.local/bin/ienergy-query');
+  assert((await fs.stat(executable)).mode & 0o111);
+  const fullMerged = JSON.parse(await fs.readFile(path.join(fullRoot, 'openclaw.json'), 'utf8'));
+  assert.equal(fullMerged.channels.advbot.accounts.ec.gatewayToken, 'test-current-gateway-token-123456789');
+  assert.equal(fullMerged.channels.advbot.accounts.ec.gatewayUrl, 'wss://gateway.example.com:18791');
+  for (const agent of fullConfig.deploy.agents) {
+    await assert.rejects(fs.access(path.join(fullRoot, 'remote', agent.name)), { code: 'ENOENT' });
+  }
   console.log('包级测试通过：真实 npm 安装、生产依赖锁、空格路径、prepare-only、重复 dry-run、CLI 复用、4 份策略提前应用、随包 openclaw.json 合并、advbot 账号配置及重启后核验。');
+  console.log('完整 IEMS 安装入口测试通过：onboard、3 个 agent、24 个 workspace skills、业务程序和 env、重复部署备份、插件复用、网关重启及临时目录清理。');
 } finally { await fs.rm(root, { recursive: true, force: true }); }

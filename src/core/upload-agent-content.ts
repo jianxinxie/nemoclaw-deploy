@@ -16,7 +16,7 @@ export async function uploadAgentContent(ctx: DeployContext): Promise<'skipped' 
     throw new Error('agentContent.hostDir 是必填字段');
   }
 
-  const hostDir = await validateAgentContentDir(ctx.agentContent.hostDir);
+  const hostDir = await validateAgentContentDir(ctx.agentContent.hostDir, ctx.agentContent.ignore);
   const hostDirName = path.basename(hostDir);
   const remoteBase = remoteTempBase(ctx);
   const remoteSourceDir = `${remoteBase}/agent-content`;

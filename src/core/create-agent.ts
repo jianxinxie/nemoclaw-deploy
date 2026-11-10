@@ -1,6 +1,7 @@
 import type { DeployContext } from './context.js';
 import { logger } from '../utils/logger.js';
 import { runCommand } from '../utils/run.js';
+import { validateWorkspace } from '../utils/validators.js';
 
 export async function createAgent(ctx: DeployContext): Promise<void> {
   const initialListResult = await runCommand(
@@ -73,24 +74,25 @@ export async function createAgent(ctx: DeployContext): Promise<void> {
 
 export function agentListContains(raw: string, agentName: string): boolean {
   try {
-    return Boolean(findAgentRecord(JSON.parse(raw), agentName));
+    return Boolean(findAgentRecord(parseAgentList(raw), agentName));
   } catch {
-    return raw.includes(`"${agentName}"`) || raw.split(/\s+/).includes(agentName);
+    return false;
   }
 }
 
 function syncExistingAgentContext(ctx: DeployContext, raw: string): boolean {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = parseAgentList(raw);
   } catch {
-    return agentListContains(raw, ctx.agentName);
+    throw new Error('无法解析 agents list --json 输出，已停止创建和上传，请先检查 NemoClaw/OpenClaw 状态。');
   }
 
   const agent = findAgentRecord(parsed, ctx.agentName);
   if (!agent) return false;
 
-  const liveWorkspace = readString(agent.workspace, agent.workspacePath, agent.workspaceDir);
+  const workspace = readString(agent.workspace, agent.workspacePath, agent.workspaceDir);
+  const liveWorkspace = workspace ? validateWorkspace(workspace) : undefined;
   if (liveWorkspace && liveWorkspace !== ctx.workspace) {
     const configuredWorkspace = ctx.workspace;
     logger.warn(
@@ -109,6 +111,18 @@ function syncExistingAgentContext(ctx: DeployContext, raw: string): boolean {
     );
   }
   return true;
+}
+
+function parseAgentList(raw: string): unknown {
+  // OpenClaw plugin discovery may log before the JSON document. Only accept
+  // a complete object/array, never a textual mention of an agent name.
+  for (const match of raw.matchAll(/(?:^|\n)[ \t]*([\[{])/g)) {
+    try {
+      const value: unknown = JSON.parse(raw.slice(match.index! + match[0].length - 1).trim());
+      if (value && typeof value === 'object') return value;
+    } catch { /* Try the next line that could begin the JSON document. */ }
+  }
+  throw new Error('Invalid agents JSON');
 }
 
 function findAgentRecord(value: unknown, agentName: string): Record<string, unknown> | undefined {

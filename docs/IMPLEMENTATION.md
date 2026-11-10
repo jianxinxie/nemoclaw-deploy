@@ -60,9 +60,9 @@
 10. 验证插件启用状态和 advbot channel 支持。
 11. 按 `env.directory` 写入每个 agent 的 env 文件；未指定目录时使用 workspace。
 12. 在配置的 sandbox 工作目录执行每个 agent 的 `sandbox.commands`。
-13. 清理 sandbox 临时目录并按配置统一重启 gateway。
+13. 按配置统一重启 gateway。
 14. 验证 agent、sandbox 和各 workspace skills 状态。
-15. 为开启 `channelRegistration` 的每个 agent 调用 channel server 注册接口；失败时按 `continueOnError` 决定继续或终止。
+15. 清理 sandbox 临时目录并输出部署摘要。
 
 ## 关键实现
 

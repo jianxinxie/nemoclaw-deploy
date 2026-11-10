@@ -30,8 +30,7 @@ async function fixture(t) {
     await fs.writeFile(path.join(content, 'skills/demo/SKILL.md'), `---\nname: demo\ndescription: Skill for ${name}\n---\n${name}\n`);
     agents.push({ name, workspace: path.join(root, 'workspaces', name),
       agentContent: { enabled: true, hostDir: content }, env: { enabled: false },
-      sandbox: { uploads: { enabled: false }, commands: { enabled: false } },
-      channelRegistration: { enabled: false } });
+      sandbox: { uploads: { enabled: false }, commands: { enabled: false } } });
   }
   const policies = path.join(root, 'policies');
   await fs.mkdir(policies);
@@ -222,6 +221,81 @@ test('up and deploy dry-run invoke no NemoClaw commands', async (t) => {
   assert.deepEqual(await f.calls(), []);
 });
 
+test('invalid and canonically duplicate workspaces fail before any remote changes', async t => {
+  for (const workspace of ['relative/workspace', '/', '/sandbox/work\nspace']) {
+    const f = await fixture(t);
+    f.config.deploy.agents[0].workspace = workspace;
+    await f.write();
+    const result = f.run();
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /workspace/);
+    assert.deepEqual(await f.calls(), []);
+  }
+  const f = await fixture(t);
+  f.config.deploy.agents[1].workspace = f.config.deploy.agents[0].workspace + '/../alpha/';
+  await f.write();
+  assert.match(f.run().stderr, /workspace 重复/);
+  assert.deepEqual(await f.calls(), []);
+});
+
+test('up rejects unsupported uploads and content fully excluded by ignore before installation', async t => {
+  for (const kind of ['content-link', 'upload-link', 'ignored-content']) {
+    const f = await fixture(t);
+    const agent = f.config.deploy.agents[0];
+    if (kind === 'ignored-content') agent.agentContent.ignore = ['*'];
+    else {
+      const link = path.join(agent.agentContent.hostDir, 'linked-content');
+      await fs.symlink(path.join(agent.agentContent.hostDir, 'SOUL.md'), link);
+      if (kind === 'upload-link') {
+        agent.agentContent.enabled = false;
+        agent.sandbox.uploads = { enabled: true, items: [{ source: agent.agentContent.hostDir,
+          destination: path.join(f.root, 'uploaded'), overwrite: false }] };
+      }
+    }
+    await f.write();
+    const result = spawnSync(process.execPath, [cli, 'up', '--config', f.configPath, '--non-interactive'],
+      { env: f.env, encoding: 'utf8', timeout: 10_000 });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /符号链接|应用 ignore 后/);
+    assert.deepEqual(await f.calls(), []);
+  }
+  const f = await fixture(t);
+  const content = f.config.deploy.agents[0].agentContent;
+  await fs.symlink('/missing/ignored-target', path.join(content.hostDir, 'ignored-link'));
+  content.ignore = ['ignored-link'];
+  await f.write();
+  assert.equal(f.run().status, 0, 'ignored links must not block safe content uploads');
+});
+
+test('malformed agent JSON cannot be mistaken for an existing agent', async t => {
+  const f = await fixture(t);
+  const result = f.run([], { TEST_AGENT_LIST_INVALID: '1' });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /无法解析 agents list --json/);
+  const calls = await f.calls();
+  assert(!calls.some(args => args[1] === 'upload' || (args[1] === 'agents' && args[2] === 'add')));
+  const prefixed = f.run([], { TEST_AGENT_LIST_PREFIX: '1' });
+  assert.equal(prefixed.status, 0, prefixed.stdout + prefixed.stderr);
+});
+
+test('removed registration configuration fails before deploy or up runs any external command', async t => {
+  for (const enabled of [false, true]) {
+    await t.test(`enabled=${enabled}`, async t => {
+      const f = await fixture(t);
+      f.config.deploy.agents[0].channelRegistration = { enabled, continueOnError: true };
+      await f.write();
+      for (const command of ['deploy', 'up']) {
+        const result = spawnSync(process.execPath,
+          [cli, command, '--config', f.configPath, '--non-interactive'],
+          { env: f.env, encoding: 'utf8', timeout: 10_000 });
+        assert.equal(result.status, 1, result.stdout + result.stderr);
+        assert.match(result.stderr, /channelRegistration/);
+        assert.deepEqual(await f.calls(), []);
+      }
+    });
+  }
+});
+
 const pluginInstalls = calls => calls.filter(args => args[1] === 'exec'
   && args[3] === 'openclaw' && args[4] === 'plugins' && args[5] === 'install');
 
@@ -296,6 +370,11 @@ test('deploy validates the dashboard switch before side effects and dry-run exec
 test('channel and partial JSON are committed together, preserve existing state and survive repeat deploy', async (t) => {
   const f = await fixture(t);
   const { partialPath } = await configureChannelOverlay(f);
+  const curlMarker = path.join(f.root, 'curl-invoked');
+  await fs.writeFile(path.join(f.root, 'bin/curl'), `#!${process.execPath}
+require('node:fs').writeFileSync(require('node:path').join(process.env.TEST_ROOT, 'curl-invoked'), 'unexpected registration');
+process.exit(98);
+`, { mode: 0o755 });
   const partialText = await fs.readFile(partialPath, 'utf8');
   const configPath = path.join(f.root, 'openclaw.json');
   await fs.writeFile(configPath, JSON.stringify({ gateway: { auth: { token: 'preserve-gateway-secret' } },
@@ -327,7 +406,9 @@ test('channel and partial JSON are committed together, preserve existing state a
     }
     assert.doesNotMatch(result.stdout + result.stderr, /test-current-gateway-token-123456789|test-dashboard-secret|stale-overlay-token/);
     assert.match(result.stdout, /部署完成/);
+    assert.doesNotMatch(result.stdout + result.stderr, /Channel Registration|\/v1\/openclaw\/agents|注册/);
   }
+  await assert.rejects(fs.access(curlMarker), { code: 'ENOENT' });
   assert.equal(await fs.readFile(partialPath, 'utf8'), partialText, 'host overlay stays unchanged');
   const calls = await f.calls();
   assert.equal(calls.filter(args => args[1] === 'gateway-token').length, 2);
@@ -757,7 +838,30 @@ test('shell dry-run rejects an old deploy CLI without installing packages', asyn
     encoding: 'utf8', timeout: 10_000
   });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /预先安装 nemoclaw-deploy >= 0.0.10/);
+  assert.match(result.stderr, /预先安装 nemoclaw-deploy >= 0.0.11/);
   await assert.rejects(fs.access(npmMarker));
   assert.deepEqual(await f.calls(), []);
+});
+
+test('interactive plugin install confirms each required consent and never retries policy blocks', async t => {
+  for (const scenario of ['accept', 'decline', 'block', 'repeated-gate']) {
+    const f = await fixture(t);
+    f.config.deploy.shared.plugins = { enabled: true,
+      items: [{ id: 'advbot', source: '@advantech-axa/advbot', trustSource: true }] };
+    await f.write();
+    const original = await fs.readFile(f.configPath, 'utf8');
+    const result = await runPluginTrustPrompt(f, scenario !== 'decline', {
+      TEST_PLUGIN_CAPABILITIES: '1', TEST_PLUGIN_POLICY_WARNING: '1',
+      ...(scenario === 'block' ? { TEST_PLUGIN_POLICY_BLOCK: '1' } : {}),
+      ...(scenario === 'repeated-gate' ? { TEST_PLUGIN_FORCE_FAILURE: 'Plugin capabilities require --accept-capabilities' } : {})
+    });
+    assert.equal(result.status, scenario === 'accept' ? 0 : 1, result.stdout + result.stderr);
+    const prompts = (await fs.readFile(path.join(f.root, 'prompts.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+    assert(prompts.every(prompt => prompt.default === false));
+    const installs = pluginInstalls(await f.calls());
+    assert.equal(prompts.length, ['accept', 'block'].includes(scenario) ? 2 : 1);
+    assert.equal(installs.length, scenario === 'decline' ? 1 : scenario === 'repeated-gate' ? 2 : 3);
+    if (scenario === 'block') assert.match(result.stderr, /security.installPolicy blocked/);
+    assert.equal(await fs.readFile(f.configPath, 'utf8'), original);
+  }
 });

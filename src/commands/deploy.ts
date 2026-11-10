@@ -17,12 +17,6 @@ import { restartGateway, type RestartGatewayResult } from '../core/restart-gatew
 import { applyPolicy, validateNetworkPolicies } from '../core/apply-policy.js';
 import { configureEnv } from '../core/configure-env.js';
 import { executeSandboxCommands } from '../core/install-dependencies.js';
-import {
-  agentRegistrationUrl,
-  precheckAgentRegistration,
-  registerAgent,
-  type RegisterAgentResult
-} from '../core/register-agent.js';
 import { verifyDeployment } from '../core/verify.js';
 import { logger } from '../utils/logger.js';
 import { maskSecret } from '../utils/mask.js';
@@ -42,7 +36,6 @@ interface AgentDeploySummary {
   skills: WorkspaceSkill[];
   env: { status: 'skipped' | 'configured'; targetFile?: string; count: number };
   dependencies: { status: 'skipped' | 'executed' | 'partial'; count: number };
-  channelRegistration: RegisterAgentResult;
 }
 
 interface DeploySummary {
@@ -92,8 +85,7 @@ async function executeDeploy(options: DeployCliOptions, plan: DeployPlan): Promi
       fileCopies: { status: 'skipped', count: 0 },
       skills: workspaceSkills[index],
       env: { status: 'skipped', count: 0 },
-      dependencies: { status: 'skipped', count: 0 },
-      channelRegistration: 'skipped'
+      dependencies: { status: 'skipped', count: 0 }
     })),
     plugins: { status: 'skipped', installed: 0, enabled: 0 },
     openclawConfig: { status: 'unchanged' },
@@ -112,8 +104,6 @@ async function executeDeploy(options: DeployCliOptions, plan: DeployPlan): Promi
     // before any agent changes so an earlier deploy failure cannot skip them.
     logger.step('应用 sandbox 共享 network policies（agent、插件和 channel 配置之前）...');
     summary.networkPolicy = await applyPolicy(shared);
-
-    await precheckAgentRegistration(plan.agents);
 
     logger.step(`创建或确认 ${plan.agents.length} 个 agent...`);
     for (const [index, ctx] of plan.agents.entries()) {
@@ -185,11 +175,6 @@ async function executeDeploy(options: DeployCliOptions, plan: DeployPlan): Promi
       });
     }
 
-    logger.step('向 channel server 注册已启用的 agents...');
-    for (const [index, ctx] of plan.agents.entries()) {
-      summary.agents[index].channelRegistration = await registerAgent(ctx);
-    }
-
     await cleanupAllRemoteTemp(plan.agents);
     cleanupCompleted = true;
     printSummary(plan, summary);
@@ -231,13 +216,7 @@ function printPlan(plan: DeployPlan): void {
       ['Env Variables', formatEnvVariables(ctx)],
       ['Sandbox Commands', enabledLabel(ctx.sandbox.commands.enabled)],
       ['Commands Workdir', ctx.sandbox.commands.enabled ? ctx.sandbox.commands.workingDir : '-'],
-      ['Commands', formatDependencyCommands(ctx.sandbox.commands.items)],
-      [
-        'Channel Registration',
-        ctx.channelRegistration.enabled
-          ? `enabled (${agentRegistrationUrl(ctx.channelServer.url)}, agentLabel=${ctx.channelRegistration.agentLabel}, continueOnError=${ctx.channelRegistration.continueOnError})`
-          : 'disabled'
-      ]
+      ['Commands', formatDependencyCommands(ctx.sandbox.commands.items)]
     ]);
   }
 
@@ -277,8 +256,7 @@ function printSummary(plan: DeployPlan, summary: DeploySummary): void {
       ['Sandbox Uploads', `${agent.fileCopies.status}${agent.fileCopies.count ? ` (${agent.fileCopies.count})` : ''}`],
       ['Skills', agent.skills.length ? `workspace verified (${agent.skills.length})` : 'none uploaded'],
       ['Env', formatEnvSummary(agent.env)],
-      ['Sandbox Commands', formatDependenciesSummary(agent.dependencies)],
-      ['Channel Registration', agent.channelRegistration]
+      ['Sandbox Commands', formatDependenciesSummary(agent.dependencies)]
     ]);
   }
   printBlock('Sandbox 共享结果', [
@@ -410,7 +388,7 @@ export async function validateDeployResources(plan: DeployPlan): Promise<Workspa
 
 async function validateRuntimeResources(ctx: DeployContext): Promise<WorkspaceSkill[]> {
   if (ctx.agentContent.enabled && ctx.agentContent.hostDir) {
-    ctx.agentContent.hostDir = await validateAgentContentDir(ctx.agentContent.hostDir);
+    ctx.agentContent.hostDir = await validateAgentContentDir(ctx.agentContent.hostDir, ctx.agentContent.ignore);
   }
   if (ctx.sandbox.uploads.enabled) {
     for (const item of ctx.sandbox.uploads.items) {

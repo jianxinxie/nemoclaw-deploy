@@ -24,6 +24,7 @@ import {
   validatePluginSource,
   validateSandboxCopyDestination,
   validateSandboxName,
+  validateWorkspace,
   validateTrustedPrivateHost
 } from '../utils/validators.js';
 
@@ -72,12 +73,6 @@ export interface DeployContext {
       items: string[];
       continueOnError: boolean;
     };
-  };
-
-  channelRegistration: {
-    enabled: boolean;
-    agentLabel: string;
-    continueOnError: boolean;
   };
 
   plugins: {
@@ -154,12 +149,6 @@ const sandboxCommandsSchema = z.object({
   continueOnError: z.boolean().optional()
 }).strict().optional();
 
-const channelRegistrationSchema = z.object({
-  enabled: z.boolean().optional(),
-  agentLabel: z.string().optional(),
-  continueOnError: z.boolean().optional()
-}).strict().optional();
-
 const envSchema = z.object({
   enabled: z.boolean().optional(),
   directory: z.string().optional(),
@@ -218,7 +207,6 @@ const agentDeploySchema = z.object({
     uploads: sandboxUploadsSchema,
     commands: sandboxCommandsSchema
   }).strict().optional(),
-  channelRegistration: channelRegistrationSchema,
   env: envSchema
 }).strict();
 
@@ -246,7 +234,6 @@ const normalizedAgentConfigSchema = z.object({
     uploads: sandboxUploadsSchema,
     commands: sandboxCommandsSchema
   }).strict().optional(),
-  channelRegistration: channelRegistrationSchema,
   plugins: pluginsSchema,
   openclawConfig: openclawConfigSchema,
   channelServer: channelServerSchema,
@@ -339,9 +326,7 @@ async function collectOneDeployContext(
 
   const defaultWorkspace = `/sandbox/.openclaw/workspace/${agentName}`;
   const configuredWorkspace = normalizeOptionalString(config.workspace);
-  const workspace =
-    configuredWorkspace ??
-    defaultWorkspace;
+  const workspace = validateWorkspace(configuredWorkspace ?? defaultWorkspace);
 
   const configuredModel = normalizeOptionalString(config.model ?? undefined);
   const model = configuredModel ? validateAgentModel(configuredModel) : undefined;
@@ -445,22 +430,6 @@ async function collectOneDeployContext(
       )
     : '';
 
-  const channelRegistrationEnabled = await readOptionalBoolean({
-    current: config.channelRegistration?.enabled,
-    interactive,
-    promptMessage: `是否向 channel server 注册 agent ${agentName}？`,
-    defaultValue: false
-  });
-  if (channelRegistrationEnabled && !channelServerEnabled) {
-    throw new Error(
-      `agent ${agentName} 设置了 channelRegistration.enabled=true，但 deploy.shared.channelServer.enabled=false`
-    );
-  }
-  const channelRegistrationContinueOnError =
-    config.channelRegistration?.continueOnError ?? true;
-  const channelRegistrationAgentLabel =
-    normalizeOptionalString(config.channelRegistration?.agentLabel) ?? sandboxName;
-
   const networkPolicyEnabled = await readOptionalBoolean({
     current: config.networkPolicy?.enabled,
     interactive,
@@ -553,11 +522,6 @@ async function collectOneDeployContext(
         continueOnError: config.sandbox?.commands?.continueOnError ?? false
       }
     },
-    channelRegistration: {
-      enabled: channelRegistrationEnabled,
-      agentLabel: channelRegistrationAgentLabel,
-      continueOnError: channelRegistrationContinueOnError
-    },
     plugins: {
       enabled: pluginsEnabled,
       items: pluginItems
@@ -609,7 +573,6 @@ export async function loadDeployConfigs(configPath: string): Promise<NormalizedD
       model: agent.model,
       agentContent: agent.agentContent,
       sandbox: agent.sandbox,
-      channelRegistration: agent.channelRegistration,
       plugins: shared.plugins,
       openclawConfig: shared.openclawConfig,
       channelServer: shared.channelServer,

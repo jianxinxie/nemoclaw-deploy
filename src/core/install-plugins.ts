@@ -236,43 +236,47 @@ async function installPlugin(ctx: DeployContext, item: PluginItemConfig): Promis
     timeoutMs: 300_000,
     description: `在 sandbox 中安装 OpenClaw 插件 ${item.id}`
   };
-  try {
-    await runCommand('nemoclaw', args, options);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    if (!item.acceptCapabilities && /--accept-capabilities\b/.test(detail)) {
-      throw new Error(`${detail}\n审查插件 ${item.id} 声明的能力后，可在对应插件项设置 acceptCapabilities: true。`);
+  // Each explicit consent may add its flag once. Other failures are never retried.
+  for (;;) {
+    try {
+      await runCommand('nemoclaw', args, options);
+      return;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (/security\.installPolicy[^\n]*\bblock(?:ed)?\b/i.test(detail)) throw error;
+      let gate: { flag: string; label: string; message: string; hint: string } | undefined;
+      if (!args.includes('--accept-capabilities') && /--accept-capabilities\b/.test(detail)) {
+        gate = {
+          flag: '--accept-capabilities', label: '声明的能力',
+          message: `确认已审查并接受插件 ${item.id} 声明的能力，使用 --accept-capabilities 重试安装？`,
+          hint: `审查插件 ${item.id} 声明的能力后，可在对应插件项设置 acceptCapabilities: true。`
+        };
+      } else if (!args.includes('--acknowledge-install-policy-warning') && /--acknowledge-install-policy-warning\b/.test(detail)) {
+        gate = {
+          flag: '--acknowledge-install-policy-warning', label: '安装策略警告',
+          message: `确认已审查并接受插件 ${item.id} 的安装策略警告，使用 --acknowledge-install-policy-warning 重试？`,
+          hint: `审查安装策略警告后，可在插件 ${item.id} 上设置 acknowledgeInstallPolicyWarning: true；block 和策略执行失败仍会停止。`
+        };
+      } else if (!args.includes('--force') && /Install cancel(?:led|ed);?\s*rerun with --force after reviewing the source/i.test(detail)) {
+        gate = {
+          flag: '--force', label: '安装来源',
+          message: `确认已审查并信任插件 ${item.id} 的来源 ${item.source}，使用 --force 重试安装？`,
+          hint: [
+            `OpenClaw 要求显式确认插件 ${item.id} 的安装来源: ${item.source}`,
+            `确认已审查并信任该来源后，在 deploy.shared.plugins.items 中为 id: ${item.id} 设置 force: true，再重新部署。`,
+            '若只需确认首次安装来源，可改用 trustSource: true；重复部署仍跳过已安装插件。',
+            'force: true 会传入 --force，也会对已安装的该插件执行重装。'
+          ].join('\n')
+        };
+      }
+      if (!gate) throw error;
+      if (ctx.options.nonInteractive) throw new Error(`${detail}\n${gate.hint}`);
+      logger.warn(detail);
+      if (!(await confirm({ message: gate.message, default: false }))) {
+        throw new Error(`未确认插件 ${item.id} 的${gate.label}，部署已停止。\n${detail}`);
+      }
+      args.push(gate.flag);
     }
-    if (!item.acknowledgeInstallPolicyWarning && /--acknowledge-install-policy-warning\b/.test(detail)) {
-      throw new Error(`${detail}\n审查安装策略警告后，可在插件 ${item.id} 上设置 acknowledgeInstallPolicyWarning: true；block 和策略执行失败仍会停止。`);
-    }
-    // Only offer trust confirmation for OpenClaw's explicit source-review gate.
-    // Network errors and other install failures must retain their original cause.
-    if (item.force || item.trustSource || !/Install cancel(?:led|ed);?\s*rerun with --force after reviewing the source/i.test(detail)) {
-      throw error;
-    }
-
-    if (ctx.options.nonInteractive) {
-      throw new Error([
-        detail,
-        '',
-        `OpenClaw 要求显式确认插件 ${item.id} 的安装来源: ${item.source}`,
-        `确认已审查并信任该来源后，在 deploy.shared.plugins.items 中为 id: ${item.id} 设置 force: true，再重新部署。`,
-        '若只需确认首次安装来源，可改用 trustSource: true；重复部署仍跳过已安装插件。',
-        'force: true 会传入 --force，也会对已安装的该插件执行重装。'
-      ].join('\n'));
-    }
-
-    logger.warn(detail);
-    const trusted = await confirm({
-      message: `确认已审查并信任插件 ${item.id} 的来源 ${item.source}，使用 --force 重试安装？`,
-      default: false
-    });
-    if (!trusted) {
-      throw new Error(`未确认插件 ${item.id} 的安装来源，部署已停止。\n${detail}`);
-    }
-
-    await runCommand('nemoclaw', [...args, '--force'], options);
   }
 }
 

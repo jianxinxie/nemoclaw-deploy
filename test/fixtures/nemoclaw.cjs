@@ -11,8 +11,13 @@ fs.appendFileSync(path.join(root, 'command-env.jsonl'), JSON.stringify({
 }) + '\n');
 const registry = path.join(root, 'agents.json');
 const agents = () => fs.existsSync(registry) ? JSON.parse(fs.readFileSync(registry, 'utf8')) : [];
-const mapPath = (value) => value.startsWith('/tmp/nemoclaw-deploy/')
-  ? path.join(root, 'remote', value.slice('/tmp/nemoclaw-deploy/'.length)) : value;
+const mapPath = (value) => {
+  if (value.startsWith('/tmp/nemoclaw-deploy/')) return path.join(root, 'remote', value.slice('/tmp/nemoclaw-deploy/'.length));
+  if (process.env.TEST_NATIVE_PATHS && (value === '/sandbox' || value.startsWith('/sandbox/'))) {
+    return path.join(root, 'sandbox', value.slice('/sandbox'.length));
+  }
+  return value;
+};
 const json = (value) => process.stdout.write(JSON.stringify(value));
 if (args[0] === '--version') {
   const versionFile = path.join(root, 'nemoclaw-version');
@@ -26,11 +31,17 @@ if (args[0] === '--version') {
   }
   json({ found: true, phase: process.env.TEST_PHASE || 'Ready', gatewayState: 'present' });
 } else if (args[1] === 'agents' && args[2] === 'list') {
+  if (process.env.TEST_AGENT_LIST_INVALID) {
+    console.log('Failed to read agent "alpha"');
+    process.exit(0);
+  }
+  if (process.env.TEST_AGENT_LIST_PREFIX) console.log('[plugins] discovery completed');
   json(agents());
 } else if (args[1] === 'agents' && args[2] === 'add') {
   if (process.env.TEST_AGENT_CREATE_NO_RECORD) process.exit(0);
   const list = agents();
   list.push({ id: args[3], workspace: args[args.indexOf('--workspace') + 1] });
+  if (process.env.TEST_NATIVE_PATHS) fs.mkdirSync(mapPath(list.at(-1).workspace), { recursive: true });
   fs.writeFileSync(registry, JSON.stringify(list));
   const configFile = path.join(root, 'openclaw.json');
   const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
@@ -161,7 +172,7 @@ if (args[0] === '--version') {
           if (entry.isDirectory()) visit(path.join(directory, entry.name));
         }
       }
-      visit(path.join(agent.workspace, 'skills'));
+      visit(mapPath(path.join(agent.workspace, 'skills')));
       json({ workspaceDir: agent.workspace, skills });
     } else throw new Error('Unexpected OpenClaw command: ' + command.join(' '));
   } else if (command[0] === 'mkdir') {
@@ -170,8 +181,16 @@ if (args[0] === '--version') {
     const target = mapPath(command.at(-1));
     if (!target.startsWith(root + path.sep)) throw new Error('Unsafe fixture cleanup');
     fs.rmSync(target, { recursive: true, force: true });
+  } else if (command[0] === 'test') {
+    const stat = fs.statSync(mapPath(command[2]), { throwIfNoEntry: false });
+    process.exit(stat && ((command[1] === '-f' && stat.isFile()) || (command[1] === '-d' && stat.isDirectory())) ? 0 : 1);
   } else if (command[0] === 'sh') {
     if (!env.COMMAND_WORKDIR?.startsWith(root + path.sep)) throw new Error('Unsafe fixture command workdir');
+    if (process.env.TEST_NATIVE_PATHS) {
+      const script = mapPath(command[1]);
+      fs.writeFileSync(script, fs.readFileSync(script, 'utf8').replaceAll('/sandbox/', path.join(root, 'sandbox') + '/'));
+      env.PATH = mapPath('/sandbox/.local/bin') + path.delimiter + env.PATH;
+    }
     const result = spawnSync('/bin/sh', command.slice(1).map(mapPath), { env, encoding: 'utf8' });
     process.stdout.write(result.stdout || '');
     process.stderr.write(result.stderr || '');

@@ -37,7 +37,7 @@ eval(args[1]);
   await fs.writeFile(path.join(nodeBin, 'node'), fakeNode('22.23.0'), { mode: 0o755 });
   await fs.writeFile(path.join(bin, 'npm'), '#!/bin/sh\ncase "$1" in -v|--version) echo 11.0.0; exit 0 ;; esac\nexit 99\n', { mode: 0o755 });
   await fs.writeFile(path.join(bin, 'nemoclaw-deploy'), `#!/bin/sh
-if [ "$1" = --version ]; then echo 0.0.10; exit 0; fi
+if [ "$1" = --version ]; then echo 0.0.11; exit 0; fi
 printf '%s\\n' "$*" >> "$TEST_ROOT/up-calls"
 exit "\${TEST_UP_FAILURE:-0}"
 `, { mode: 0o755 });
@@ -95,7 +95,7 @@ nvm() {
   const addBundle = async (content = 'fixture package') => {
     const packages = path.join(root, 'packages');
     await fs.mkdir(packages, { recursive: true });
-    const filename = 'advantech-axa-nemoclaw-deploy-0.0.10.tgz';
+    const filename = 'advantech-axa-nemoclaw-deploy-0.0.11.tgz';
     await fs.writeFile(path.join(packages, filename), content);
     const hash = createHash('sha256').update(content).digest('hex');
     await fs.writeFile(path.join(packages, 'SHA256SUMS'), hash + '  ' + filename + '\n');
@@ -249,7 +249,7 @@ for (const script of installerScripts) {
   test(`${script}: corrupt bundled package fails before Node preparation or npm`, async t => {
     const f = await fixture(t, script, false);
     await f.addBundle();
-    await fs.appendFile(path.join(f.root, 'packages/advantech-axa-nemoclaw-deploy-0.0.10.tgz'), 'corrupt');
+    await fs.appendFile(path.join(f.root, 'packages/advantech-axa-nemoclaw-deploy-0.0.11.tgz'), 'corrupt');
     const result = f.run();
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.match(result.stderr, /SHA256 校验失败/);
@@ -301,5 +301,21 @@ for (const script of installerScripts) {
     assert.equal(failed.status, 1, failed.stdout + failed.stderr);
     assert.match(failed.stderr, /新 CLI 版本检查失败/);
     assert.equal(await fs.readlink(path.join(f.prefix, 'bin/nemoclaw-deploy')), selected);
+  });
+
+  test(`${script}: a cache publication failure leaves the previous CLI selected`, async t => {
+    const f = await fixture(t, script);
+    await f.addBundle();
+    assert.equal(f.run().status, 0);
+    const executable = path.join(f.prefix, 'bin/nemoclaw-deploy');
+    const selected = await fs.readlink(executable);
+    const hash = await f.addBundle('updated package with invalid publication target');
+    await fs.mkdir(path.join(f.prefix, 'releases', hash));
+    const failed = f.run();
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+    assert.match(failed.stderr, /CLI 发布目标/);
+    assert.equal(await fs.readlink(executable), selected);
+    const existing = spawnSync(executable, ['--version'], { env: f.env, encoding: 'utf8' });
+    assert.equal(existing.status, 0);
   });
 }

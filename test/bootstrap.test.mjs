@@ -268,8 +268,7 @@ test('up selects the freshly installed CLI over a stale executable earlier on PA
   f.config.deploy = { shared: { plugins: { enabled: false }, openclawConfig: { enabled: false },
     channelServer: { enabled: false }, networkPolicy: { enabled: false }, options: { restartGateway: false } },
     agents: [{ name: 'alpha', workspace: path.join(f.root, 'workspace'), agentContent: { enabled: false },
-      env: { enabled: false }, sandbox: { uploads: { enabled: false }, commands: { enabled: false } },
-      channelRegistration: { enabled: false } }] };
+      env: { enabled: false }, sandbox: { uploads: { enabled: false }, commands: { enabled: false } } }] };
   await f.write();
   const result = f.run([], { HOME: home, PATH: `${path.join(f.root, 'bin')}:${localBin}`,
     TEST_INSTALL_NEW_CLI: path.join(repo, 'test/fixtures/nemoclaw.cjs') }, 'up');

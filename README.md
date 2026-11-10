@@ -180,7 +180,7 @@ deploy:
 
 写入后会重新读取配置核对合并结果，并通过 `openclaw channels list --all --json` 确认 advbot 账号被识别；检查失败则回滚本次配置事务。全部操作和网关重启结束后还会再次核对配置，确认保存成功后才显示“部署完成”。
 
-插件的来源和安装确认选项留在 `onboard.yaml`，插件 channel 业务配置放在 partial。`deploy.shared.channelServer` 只负责 ChannelServer URL、agent 注册以及 advbot 的动态 gateway 字段。
+插件的来源和安装确认选项留在 `onboard.yaml`，插件 channel 业务配置放在 partial。`deploy.shared.channelServer` 负责 ChannelServer URL、advbot 账号及动态 gateway 字段，不向 channel server 发送 agent 注册请求。
 
 启用 ChannelServer 时，每次部署都会获取当前 gateway token 和 URL，写入 `channels.advbot.accounts.<advbotAccountId>`，并覆盖 partial 中过时的连接字段；已有账号的其他业务配置及其他账号会保留。token 只用于 sandbox 配置，日志脱敏，主机上的 partial 文件保持原样。
 
@@ -202,7 +202,7 @@ chmod +x install-and-up.sh
 nemoclaw-deploy up --config onboard.yaml
 ```
 
-存在随包 CLI 时，脚本按 SHA256 复用本地安装，同版本修复也能自动更新；没有随包 CLI 时，优先复用脚本专用 prefix，然后检查 PATH 中版本 >=0.0.10 的 CLI。安装失败保留旧 CLI。需要显式重新安装时使用：
+存在随包 CLI 时，脚本按 SHA256 复用本地安装，同版本修复也能自动更新；没有随包 CLI 时，优先复用脚本专用 prefix，然后检查 PATH 中版本 >=0.0.11 的 CLI。安装失败保留旧 CLI。需要显式重新安装时使用：
 
 ```bash
 FORCE_CLI_INSTALL=1 ./install-and-up.sh
@@ -218,7 +218,7 @@ nvm 和 NVIDIA 安装器均先完整下载，再执行；下载启用有限重�
 
 在源码仓库执行 `npm run bundle:iems`，可重建含 CLI、安装入口及两级 SHA256 清单的 IEMS 包，并自动进行解压校验。IEMS 业务配置仅进入内部 ZIP，不进入公开 npm 包。
 
-`NPM_OFFLINE=1 npm run test:bundle` 从 ZIP 进行空缓存的真实 CLI 安装与重复运行检查，不创建 sandbox。
+`NPM_OFFLINE=1 npm run test:bundle` 从 ZIP 进行空缓存的真实 CLI 安装与重复运行检查，并通过隔离的 sandbox 传输测试完整执行 IEMS 安装入口：3 个 agent、24 个 workspace skills、业务程序和 env、重复部署备份、插件复用、网关重启和清理。该测试不创建真实 sandbox，也不访问业务接口。
 
 ## 安全提示
 

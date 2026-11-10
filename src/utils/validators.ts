@@ -2,6 +2,7 @@ import path from 'node:path';
 import { isIP } from 'node:net';
 import fs from 'fs-extra';
 import { z } from 'zod';
+import { createIgnoreMatcher } from './ignore.js';
 
 export function validateTrustedPrivateHost(input: string): string {
   const host = input.trim().toLowerCase().replace(/\.$/, '').replace(/^\[([^\]]+)\]$/, '$1');
@@ -53,6 +54,16 @@ export function validateOnboardSandboxName(value: string): string {
 
 export function validateAgentName(value: string): string {
   return agentNameSchema.parse(value);
+}
+
+export function validateWorkspace(value: string): string {
+  const workspace = value.trim();
+  if (!workspace.startsWith('/') || /[\0\r\n\\]/.test(workspace)) {
+    throw new Error('workspace 必须是 sandbox 中不含控制字符的绝对路径');
+  }
+  const normalized = path.posix.normalize(workspace).replace(/\/+$/, '');
+  if (!normalized) throw new Error('workspace 不能是 sandbox 根目录');
+  return normalized;
 }
 
 export function validateEnvName(value: string): string {
@@ -243,26 +254,44 @@ export function validateSandboxCopyDestination(value: string): string {
 
 export async function validateHostFileOrDirectory(source: string): Promise<string> {
   const resolved = path.resolve(source);
-  const stat = await fs.stat(resolved).catch(() => null);
+  const stat = await fs.lstat(resolved).catch(() => null);
   if (!stat || (!stat.isFile() && !stat.isDirectory())) {
     throw new Error(`sandbox.uploads.items[].source 不是有效的主机文件或目录: ${source}`);
   }
+  await validateUploadTree(resolved, []);
   return resolved;
 }
 
-export async function validateAgentContentDir(hostDir: string): Promise<string> {
+export async function validateAgentContentDir(hostDir: string, ignore: string[] = []): Promise<string> {
   const resolved = path.resolve(hostDir);
-  const stat = await fs.stat(resolved).catch(() => null);
+  const stat = await fs.lstat(resolved).catch(() => null);
   if (!stat?.isDirectory()) {
     throw new Error(`agentContent.hostDir 不是有效目录: ${hostDir}`);
   }
 
-  const entries = await fs.readdir(resolved);
-  if (entries.length === 0) {
-    throw new Error(`agentContent.hostDir 不能为空: ${hostDir}`);
+  if (await validateUploadTree(resolved, ignore) === 0) {
+    throw new Error(`agentContent.hostDir 不能为空，应用 ignore 后必须至少有一个可上传文件: ${hostDir}`);
   }
 
   return resolved;
+}
+
+async function validateUploadTree(root: string, ignore: string[]): Promise<number> {
+  const matcher = createIgnoreMatcher(ignore);
+  async function visit(full: string, relative: string): Promise<number> {
+    const stat = await fs.lstat(full);
+    if (relative && matcher.ignores(relative, stat.isDirectory())) return 0;
+    if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) {
+      throw new Error(`上传路径必须是普通文件或目录，不能包含符号链接或特殊文件: ${full}`);
+    }
+    if (stat.isFile()) return 1;
+    let files = 0;
+    for (const name of await fs.readdir(full)) {
+      files += await visit(path.join(full, name), relative ? `${relative}/${name}` : name);
+    }
+    return files;
+  }
+  return visit(root, '');
 }
 
 export async function collectNetworkPolicyFiles(inputPath: string): Promise<string[]> {
