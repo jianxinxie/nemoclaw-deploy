@@ -4,6 +4,7 @@ import { logger } from '../utils/logger.js';
 import { maskSecret } from '../utils/mask.js';
 import { runCommand } from '../utils/run.js';
 import { nodeEvalScript } from '../utils/script.js';
+import { commandValue, parseJsonOutput } from '../utils/output.js';
 import {
   dashboardUrlToGatewayUrl,
   validateChannelServerUrl,
@@ -77,9 +78,7 @@ export async function verifyAdvbotChannelSupported(ctx: DeployContext): Promise<
     );
 
     // Plugin discovery logs may mention advbot even if it failed to load.
-    const start = result.stdout.indexOf('{');
-    const end = result.stdout.lastIndexOf('}');
-    const parsed = JSON.parse(result.stdout.slice(start, end + 1)) as {
+    const parsed = parseJsonOutput(result.stdout, 'channels list --json') as {
       chat?: { advbot?: string[] | { accounts?: unknown; installed?: boolean; origin?: string } };
     };
     const channel = parsed.chat?.advbot;
@@ -140,7 +139,7 @@ async function getExistingAdvbotChannel(ctx: DeployContext): Promise<ExistingAdv
   );
 
   try {
-    const parsed = JSON.parse(result.stdout) as ExistingAdvbotChannel;
+    const parsed = parseJsonOutput<ExistingAdvbotChannel>(result.stdout);
     if (typeof parsed.matches !== 'boolean') throw new Error('missing matches');
     return parsed;
   } catch {
@@ -159,8 +158,8 @@ async function ensureGatewayToken(ctx: DeployContext): Promise<void> {
       rawOutput: true,
       description: '自动获取 gateway token，用于 advbot 连接 gateway'
     });
-    const token = result.stdout.trim();
-    if (!token) throw new Error('gateway-token 输出为空');
+    const token = commandValue(result.stdout);
+    if (!token || /\s/.test(token)) throw new Error('gateway-token 未输出有效的单行 token');
     ctx.channelServer.gatewayToken = token;
     return;
   } catch (error) {
@@ -190,7 +189,7 @@ async function ensureGatewayUrl(ctx: DeployContext): Promise<void> {
       rawOutput: true,
       description: '获取 dashboard URL，并推导不含 token fragment 的 gateway URL'
     });
-    const dashboardUrl = result.stdout.trim();
+    const dashboardUrl = commandValue(result.stdout);
     if (!dashboardUrl) throw new Error('dashboard-url 输出为空');
     ctx.channelServer.gatewayUrl = dashboardUrlToGatewayUrl(dashboardUrl);
     return;

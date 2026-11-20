@@ -176,7 +176,23 @@ deploy:
       file: ./openclaw.json
 ```
 
-普通对象递归合并，标量和数组覆盖，`null` 删除字段。partial 不允许包含 `agents`；channel 的 `secret` 等 OpenClaw 业务字段会直接合并，CLI 不额外拦截。agent 由 OpenClaw 管理，只有显式填写的 `deploy.agents[].model` 会按 agent ID 定向更新。
+普通对象递归合并，标量和数组覆盖，`null` 删除字段；channel 的 `secret` 等 OpenClaw 业务字段会直接合并。
+
+为指定 agent 配置 tools，在 partial 中填写 `agents.entries.<agentId>`，例如：
+
+```json
+{
+  "agents": {
+    "entries": {
+      "ienergy-agent": {
+        "tools": { "deny": ["write", "edit", "apply_patch"] }
+      }
+    }
+  }
+}
+```
+
+CLI 按 ID 合并到已存在的 agent，保留其他 agent 及未填写的字段，兼容旧格式 `agents.list: [{ "id": "ienergy-agent", "tools": { ... } }]`。不会用 partial 新建、删除 agent 或修改 `agents.defaults` 等全局生命周期配置；`workspace`、`agentDir` 可省略，填写时必须与现有值一致。`tools.deny` 等数组整体替换，需要保留的限制也应写入数组。显式填写的 `deploy.agents[].model` 最后生效，覆盖 partial 中同一 agent 的 model。
 
 写入后会重新读取配置核对合并结果，并通过 `openclaw channels list --all --json` 确认 advbot 账号被识别；检查失败则回滚本次配置事务。全部操作和网关重启结束后还会再次核对配置，确认保存成功后才显示“部署完成”。
 
@@ -185,6 +201,8 @@ deploy:
 启用 ChannelServer 时，每次部署都会获取当前 gateway token 和 URL，写入 `channels.advbot.accounts.<advbotAccountId>`，并覆盖 partial 中过时的连接字段；已有账号的其他业务配置及其他账号会保留。token 只用于 sandbox 配置，日志脱敏，主机上的 partial 文件保持原样。
 
 新版 OpenClaw 的安装确认分开配置：`trustSource: true` 确认来源，`acceptCapabilities: true` 接受插件声明的能力，`acknowledgeInstallPolicyWarning: true` 确认安装策略的警告。三项均默认关闭，按实际提示和审查结果开启；只有 `force: true` 会要求重复部署时重装插件。详见[插件安装的来源确认](docs/USAGE.md#插件安装的来源确认)。
+
+`deploy.shared.options.continueOnWarning` 默认 `true`，普通 warning 继续，上游要求确认的安装策略 warn 会自动确认后重试。策略应用失败可通过 `deploy.shared.networkPolicy.continueOnError: true` 继续；agent 命令沿用 `sandbox.commands.continueOnError`。最终摘要会列出 warning、`failed` 和 `partial` 步骤。
 
 ## 部署脚本
 
@@ -202,7 +220,7 @@ chmod +x install-and-up.sh
 nemoclaw-deploy up --config onboard.yaml
 ```
 
-存在随包 CLI 时，脚本按 SHA256 复用本地安装，同版本修复也能自动更新；没有随包 CLI 时，优先复用脚本专用 prefix，然后检查 PATH 中版本 >=0.0.11 的 CLI。安装失败保留旧 CLI。需要显式重新安装时使用：
+存在随包 CLI 时，脚本按 SHA256 复用本地安装，同版本修复也能自动更新；没有随包 CLI 时，优先复用脚本专用 prefix，然后检查 PATH 中版本 >=0.0.13 的 CLI。安装失败保留旧 CLI。需要显式重新安装时使用：
 
 ```bash
 FORCE_CLI_INSTALL=1 ./install-and-up.sh

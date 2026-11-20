@@ -9,6 +9,7 @@ import { runCommand } from '../utils/run.js';
 import { nodeEvalScript } from '../utils/script.js';
 import { validateAgentContentDir } from '../utils/validators.js';
 import { withTrailingSlash } from '../utils/fs.js';
+import { parseJsonOutput } from '../utils/output.js';
 
 export async function uploadAgentContent(ctx: DeployContext): Promise<'skipped' | 'applied'> {
   if (!ctx.agentContent.enabled) return 'skipped';
@@ -150,7 +151,7 @@ async function detectRemoteConflicts(
   if (!result.stdout.trim()) return [];
 
   try {
-    const parsed = JSON.parse(result.stdout) as unknown;
+    const parsed = parseJsonOutput(result.stdout);
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
   } catch {
     throw new Error(`无法解析 agent-content 冲突检测结果: ${result.stdout}`);

@@ -1,3 +1,5 @@
+import { commandValue } from './output.js';
+
 // Default install target and oldest supported CLI are independent: newer
 // defaults must not invalidate an otherwise compatible existing sandbox.
 export const NEMOCLAW_VERSION = 'v0.0.139';
@@ -10,7 +12,7 @@ export const OPENCLAW_NODE_RANGE = '>=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0';
 
 /** Match the exact engines.node contract of the OpenClaw runtime pinned by NemoClaw. */
 export function assertOpenClawNodeVersion(output: string): string {
-  const version = output.match(/\bv?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\b/)?.[1];
+  const version = commandValue(output).match(/\bv?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\b/)?.[1];
   const parsed = version ? parseSemanticVersion(version) : undefined;
   const major = parsed?.core[0];
   const supported = parsed && parsed.prerelease.length === 0 && (
@@ -25,7 +27,7 @@ export function assertOpenClawNodeVersion(output: string): string {
 }
 
 export function assertMinimumVersion(output: string, minimum: string, label: string): string {
-  const version = output.match(/\bv?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\b/)?.[1];
+  const version = commandValue(output).match(/\bv?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\b/)?.[1];
   if (!version || isInstalledVersionLower(version, minimum)) {
     throw new Error(`${label} 版本不满足要求：${version ?? '无法识别'}，需要 >= ${minimum}。请先更新对应运行环境。`);
   }

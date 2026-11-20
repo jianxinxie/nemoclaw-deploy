@@ -12,6 +12,7 @@ import {
 import { logger } from '../utils/logger.js';
 import { runCommand, withCommandEnvironment } from '../utils/run.js';
 import { dashboardEnvironment, dashboardBindLabel } from '../core/dashboard.js';
+import { commandValue } from '../utils/output.js';
 import { assertMinimumVersion, isInstalledVersionLower, normalizeVersion, MIN_NEMOCLAW_VERSION } from '../utils/versions.js';
 import { assertSandboxRunning } from '../core/runtime.js';
 export { isInstalledVersionLower } from '../utils/versions.js';
@@ -514,7 +515,7 @@ async function readInstalledNemoclawVersion(executable: string): Promise<string 
       timeoutMs: 30_000,
       logCommand: false
     });
-    const match = result.stdout.match(
+    const match = commandValue(result.stdout).match(
       /\bv?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\b/
     );
     return match ? `v${match[1]}` : undefined;

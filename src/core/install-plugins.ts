@@ -8,6 +8,7 @@ import { runCommand } from '../utils/run.js';
 import { nodeEvalScript } from '../utils/script.js';
 import { withTrailingSlash } from '../utils/fs.js';
 import { validateHostFileOrDirectory } from '../utils/validators.js';
+import { commandValue, parseJsonOutput } from '../utils/output.js';
 
 export async function validatePluginSources(ctx: DeployContext): Promise<void> {
   if (!ctx.plugins.enabled) return;
@@ -109,18 +110,7 @@ async function listDiscoveredPlugins(ctx: DeployContext): Promise<Map<string, Di
 }
 
 function parsePluginList(stdout: string): Map<string, DiscoveredPlugin> {
-  const start = stdout.indexOf('{');
-  const end = stdout.lastIndexOf('}');
-  if (start < 0 || end <= start) {
-    throw new Error(`无法解析 openclaw plugins list --json 输出: ${stdout.slice(0, 200)}`);
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout.slice(start, end + 1));
-  } catch {
-    throw new Error(`无法解析 openclaw plugins list --json 输出: ${stdout.slice(0, 200)}`);
-  }
+  const parsed = parseJsonOutput(stdout, 'openclaw plugins list --json');
 
   const plugins = (parsed as { plugins?: unknown }).plugins;
   const out = new Map<string, DiscoveredPlugin>();
@@ -244,6 +234,12 @@ async function installPlugin(ctx: DeployContext, item: PluginItemConfig): Promis
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       if (/security\.installPolicy[^\n]*\bblock(?:ed)?\b/i.test(detail)) throw error;
+      if (ctx.options.continueOnWarning && !args.includes('--acknowledge-install-policy-warning') &&
+          /--acknowledge-install-policy-warning\b/.test(detail)) {
+        logger.warn(`插件 ${item.id} 出现安装策略 warning，自动确认该 warning 后继续。\n${detail}`);
+        args.push('--acknowledge-install-policy-warning');
+        continue;
+      }
       let gate: { flag: string; label: string; message: string; hint: string } | undefined;
       if (!args.includes('--accept-capabilities') && /--accept-capabilities\b/.test(detail)) {
         gate = {
@@ -342,7 +338,7 @@ async function resolveRemotePluginRoot(
     }
   );
 
-  const resolved = result.stdout.trim();
+  const resolved = commandValue(result.stdout);
   if (!resolved.startsWith('/')) {
     throw new Error(`无法确认插件目录的 sandbox 路径: ${result.stdout}`);
   }

@@ -50,7 +50,7 @@
 
 1. 校验所有 agent 属于同一个 sandbox，并且 agent 名称、workspace 不重复。
 2. 执行 sandbox 预检查。
-3. 应用 sandbox 共享 network policies，失败时立即停止；后续插件、内容或 channel 错误不会跳过已应用的策略。
+3. 应用 sandbox 共享 network policies；普通 warning 继续，实际失败按 networkPolicy.continueOnError 决定停止或记录 failed 后继续。
 4. 创建或确认每个 agent。
 5. 处理每个 agent 的初始化内容，skills 随内容安全上传到 workspace。
 6. 按 `deploy.agents[].sandbox.uploads` 上传主机文件或目录到 sandbox。
@@ -61,8 +61,8 @@
 11. 按 `env.directory` 写入每个 agent 的 env 文件；未指定目录时使用 workspace。
 12. 在配置的 sandbox 工作目录执行每个 agent 的 `sandbox.commands`。
 13. 按配置统一重启 gateway。
-14. 验证 agent、sandbox 和各 workspace skills 状态。
-15. 清理 sandbox 临时目录并输出部署摘要。
+14. 验证 agent、sandbox 和各 workspace skills 状态；命令已允许继续的依赖失败记录 warning。
+15. 清理 sandbox 临时目录并输出部署摘要，汇总 warning、failed 和 partial 步骤。
 
 ## 关键实现
 
@@ -88,17 +88,17 @@ agent env 会合并写入 `env.directory` 下的目标文件；目录未指定�
 
 `sandbox.commands` 会在每个 agent 指定的 `workingDir` 下执行命令。执行时 CLI 会注入 `WORKSPACE`、`VIRTUAL_ENV`、`PYTHON`，并把 `$VIRTUAL_ENV/bin` 放到 `PATH` 前面。为避免 OpenShell exec argv 拒绝换行，CLI 会把每条命令写成 sandbox 临时脚本，上传到 `/tmp/nemoclaw-deploy/<agent>/sandbox-commands/` 后通过 `sh <script>` 执行。
 
-OpenClaw 配置采用单次事务：先读取 agent 创建和插件安装后的最新 `openclaw.json`，再依次合并用户 partial、插件启用状态、ChannelServer/advbot 动态字段，并按 agent ID 设置显式 model。partial 是 `tools`、`channels` 等 OpenClaw 业务配置的唯一用户配置源，且不允许修改 `agents`，因此 workspace 等字段完全保留。写入使用同目录临时文件和原子 rename，写前保留临时备份。sandbox 临时目录另存权限为 0600 的预期配置，用于写入后及网关重启后的读取核验；临时目录在最终核验之后清理。`openclaw config validate`、首次读取核验或 advbot 账号识别失败时自动回滚。
+OpenClaw 配置采用单次事务：先读取 agent 创建和插件安装后的最新 `openclaw.json`，再依次合并用户 partial、插件启用状态、ChannelServer/advbot 动态字段，并按 agent ID 设置显式 model。partial 是 `tools`、`channels` 等 OpenClaw 业务配置的用户配置源。`agents.entries` 对象或旧式 `agents.list` 数组转为按 ID 定位的 patch，兼容 sandbox 的两种存储格式，只更新已有 agent。普通对象递归合并，数组整体替换，保留其他 agent 及未填写字段。共享校验函数同时用于主机预检查和 sandbox 脚本；不允许 agent 删除、重复 ID、目录变更或修改 `agents.defaults` 等其他 agents 字段。所有 patch 验证完成后才写入，使用同目录临时文件和原子 rename，写前保留临时备份。sandbox 临时目录另存权限为 0600 的预期配置，用于写入后及网关重启后的读取核验；临时目录在最终核验之后清理。`openclaw config validate`、首次读取核验或 advbot 账号识别失败时自动回滚。
 
 plugins 会读取 `openclaw plugins list --json` 并安装缺失插件；统一事务只负责启用已安装插件，不再接收 plugin item 内的 channel 配置。ChannelServer 集成每次都会自动获取当前 gateway token 和 URL，并只补充 `channels.advbot` 中必须动态生成的连接字段；已有账号也携带真实动态字段参与合并，防止 partial 中的旧值覆盖它们，不再用脱敏占位符代替真实 token。channel 核验解析 `openclaw channels list --all --json` 的 `chat.advbot`，确认目标账号存在。
 
-`sandbox.uploads` 同时支持主机文件和目录。文件会直接上传并验证目标；目录先上传到 agent 临时目录，再由 sandbox 内脚本递归合并。`overwrite=false` 会先完成全量冲突扫描，避免上传到一半才失败；`overwrite=true` 覆盖冲突项并保留目标目录额外内容。channel registration 通过统一 `runCommand` 调用主机 `curl`，非 2xx 响应会使部署失败。
+`sandbox.uploads` 同时支持主机文件和目录。文件会直接上传并验证目标；目录先上传到 agent 临时目录，再由 sandbox 内脚本递归合并。`overwrite=false` 会先完成全量冲突扫描，避免上传到一半才失败；`overwrite=true` 覆盖冲突项并保留目标目录额外内容。agent channel registration 已移除，部署不会向 channel server 发起注册请求。
 
 ## 安全边界
 
 - 日志中会脱敏 gateway token、常见 token/secret/password 和 npm token。
 - YAML 不允许保存 secret env。
-- openclaw partial 不允许包含 agents；其他 OpenClaw 业务字段由 CLI 直接合并，不额外拦截 secret 等字段。
+- openclaw partial 仅允许按 ID 更新已有 agent，不能删除 agent 或修改其目录；其他 OpenClaw 业务字段由 CLI 直接合并，不额外拦截 secret 等字段。
 - `onboard.environment` 只允许非敏感 `NEMOCLAW_*` 变量。
 - `--dry-run` 只打印计划和命令，不执行真实操作。
 - 多 agent 部署是 additive 行为：会创建缺少的 agent，不会删除配置外已有 agent。

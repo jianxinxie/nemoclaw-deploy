@@ -14,11 +14,11 @@ import {
   verifyOpenClawConfig
 } from '../core/apply-openclaw-config.js';
 import { restartGateway, type RestartGatewayResult } from '../core/restart-gateway.js';
-import { applyPolicy, validateNetworkPolicies } from '../core/apply-policy.js';
+import { applyPolicy, validateNetworkPolicies, type ApplyPolicyResult } from '../core/apply-policy.js';
 import { configureEnv } from '../core/configure-env.js';
 import { executeSandboxCommands } from '../core/install-dependencies.js';
 import { verifyDeployment } from '../core/verify.js';
-import { logger } from '../utils/logger.js';
+import { logger, withWarningCollection } from '../utils/logger.js';
 import { maskSecret } from '../utils/mask.js';
 import { runCommand, withCommandEnvironment } from '../utils/run.js';
 import { dashboardEnvironment, dashboardBindLabel } from '../core/dashboard.js';
@@ -47,17 +47,19 @@ interface DeploySummary {
     restarted: boolean;
     reason?: 'disabled' | 'existing';
   };
-  networkPolicy: { status: 'skipped' | 'applied'; count: number };
+  networkPolicy: ApplyPolicyResult;
   gatewayRestart: RestartGatewayResult;
+  warnings: string[];
 }
 
 export async function deployCommand(options: DeployCliOptions, preparedPlan?: DeployPlan): Promise<boolean> {
   const plan = preparedPlan ?? await collectDeployPlan(options);
-  return withCommandEnvironment(dashboardEnvironment(plan.dashboardRemoteAccess),
-    () => executeDeploy(options, plan));
+  const warnings: string[] = [];
+  return withWarningCollection(warnings, () => withCommandEnvironment(dashboardEnvironment(plan.dashboardRemoteAccess),
+    () => executeDeploy(options, plan, warnings)));
 }
 
-async function executeDeploy(options: DeployCliOptions, plan: DeployPlan): Promise<boolean> {
+async function executeDeploy(options: DeployCliOptions, plan: DeployPlan, warnings: string[]): Promise<boolean> {
   printPlan(plan);
 
   if (options.dryRun) {
@@ -91,7 +93,8 @@ async function executeDeploy(options: DeployCliOptions, plan: DeployPlan): Promi
     openclawConfig: { status: 'unchanged' },
     channelServer: { status: 'skipped', restarted: false, reason: 'disabled' },
     networkPolicy: { status: 'skipped', count: 0 },
-    gatewayRestart: 'skipped'
+    gatewayRestart: 'skipped',
+    warnings
   };
   let cleanupCompleted = false;
   let remoteTempUsed = false;
@@ -147,6 +150,9 @@ async function executeDeploy(options: DeployCliOptions, plan: DeployPlan): Promi
     logger.step('执行各 agent 的 sandbox commands...');
     for (const [index, ctx] of plan.agents.entries()) {
       summary.agents[index].dependencies = await executeSandboxCommands(ctx);
+      if (summary.agents[index].dependencies.status === 'partial') {
+        logger.warn(`agent ${ctx.agentName} 的 sandbox commands 部分未成功，已按 continueOnError=true 继续。`);
+      }
     }
 
     if (shared.options.restartGateway) {
@@ -171,7 +177,8 @@ async function executeDeploy(options: DeployCliOptions, plan: DeployPlan): Promi
     for (const [index, ctx] of plan.agents.entries()) {
       await verifyDeployment(ctx, {
         policyApplied: summary.networkPolicy.status === 'applied',
-        skills: summary.agents[index].skills
+        skills: summary.agents[index].skills,
+        allowUnreadySkills: ctx.sandbox.commands.continueOnError && summary.agents[index].dependencies.status === 'partial'
       });
     }
 
@@ -235,6 +242,8 @@ function printPlan(plan: DeployPlan): void {
     ['Network Policy', shared.networkPolicy.enabled ? `enabled (${shared.networkPolicy.dir ?? '-'})` : 'disabled'],
     ['Policy Apply Order', shared.networkPolicy.enabled ? 'sandbox 预检查后，agent、插件和 channel 配置前' : '-'],
     ['Trusted Private Hosts', formatList(shared.networkPolicy.trustedPrivateHosts)],
+    ['Policy Continue On Error', String(shared.networkPolicy.continueOnError)],
+    ['Continue On Warning', String(shared.options.continueOnWarning)],
     ['Restart At End', shared.options.restartGateway ? 'enabled' : 'disabled']
   ]);
   logger.info('');
@@ -243,7 +252,9 @@ function printPlan(plan: DeployPlan): void {
 function printSummary(plan: DeployPlan, summary: DeploySummary): void {
   const shared = plan.agents[0];
   logger.info('');
-  logger.success('部署完成');
+  const warnings = [...new Set(summary.warnings)];
+  if (warnings.length) logger.info(`部署完成（有 ${warnings.length} 项警告或未成功步骤，请查看摘要）`);
+  else logger.success('部署完成');
   printBlock('目标', [
     ['Sandbox', plan.sandboxName],
     ['Agents', String(plan.agents.length)]
@@ -254,7 +265,7 @@ function printSummary(plan: DeployPlan, summary: DeploySummary): void {
       ['Model', agent.model ?? 'preserved'],
       ['Agent Content', agent.agentContent],
       ['Sandbox Uploads', `${agent.fileCopies.status}${agent.fileCopies.count ? ` (${agent.fileCopies.count})` : ''}`],
-      ['Skills', agent.skills.length ? `workspace verified (${agent.skills.length})` : 'none uploaded'],
+      ['Skills', agent.skills.length ? `workspace checked (${agent.skills.length})` : 'none uploaded'],
       ['Env', formatEnvSummary(agent.env)],
       ['Sandbox Commands', formatDependenciesSummary(agent.dependencies)]
     ]);
@@ -273,6 +284,9 @@ function printSummary(plan: DeployPlan, summary: DeploySummary): void {
       ['Gateway URL', shared.channelServer.gatewayUrl ?? '-'],
       ['Gateway Token', maskSecret(shared.channelServer.gatewayToken)]
     ]);
+  }
+  if (warnings.length) {
+    printBlock('警告 / 未成功步骤', warnings.map((warning, index) => [String(index + 1), warning.split('\n')[0]]));
   }
   const dashboardEnv = `NEMOCLAW_DASHBOARD_BIND=${plan.dashboardRemoteAccess ? '0.0.0.0' : "''"}`;
   printBlock('验证', [
@@ -382,7 +396,11 @@ function assertResolvedWorkspaces(contexts: DeployContext[]): void {
 export async function validateDeployResources(plan: DeployPlan): Promise<WorkspaceSkill[][]> {
   await validatePluginSources(plan.agents[0]);
   const workspaceSkills = await Promise.all(plan.agents.map(validateRuntimeResources));
-  await validateNetworkPolicies(plan.agents[0]);
+  try { await validateNetworkPolicies(plan.agents[0]); }
+  catch (error) {
+    if (!plan.agents[0].networkPolicy.continueOnError) throw error;
+    logger.warn(`network policy 预检查失败，已按 networkPolicy.continueOnError=true 继续，策略步骤将报告失败：${error instanceof Error ? error.message : String(error)}`);
+  }
   return workspaceSkills;
 }
 

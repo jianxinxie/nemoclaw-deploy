@@ -51,7 +51,7 @@ deploy:
 | `acceptCapabilities: true` | 明确接受插件声明的能力，安装时传入 `--accept-capabilities`。 |
 | `acknowledgeInstallPolicyWarning: true` | 明确确认安装策略的 `warn`，传入 `--acknowledge-install-policy-warning`；`block` 和策略执行失败仍终止。 |
 
-以上属性只接受布尔值且默认 `false`。例如，已经审查来源和能力的插件可同时设置 `trustSource: true`、`acceptCapabilities: true`；安装策略没有报 `warn` 时不需要开启 `acknowledgeInstallPolicyWarning`。这些确认只作用于安装调用；需要重装已存在插件时还应设置 `force: true`。交互模式会展示上游原始提示，逐项询问来源、能力或策略警告，每项默认不确认，明确同意后才增加对应参数重试一次。非交互模式缺少确认时保留原始错误并提示配置项。网络错误、重复确认失败及策略 block 不会自动重试。
+以上插件项属性只接受布尔值且默认 `false`。已经审查来源和能力的插件可设置 `trustSource: true`、`acceptCapabilities: true`；需要重装时设置 `force: true`。`deploy.shared.options.continueOnWarning` 默认 `true`：普通诊断 warning 不阻断部署，遇到 OpenClaw 明确要求 `--acknowledge-install-policy-warning` 时，自动增加此参数重试一次。设为 `false` 可恢复策略 warn 的显式确认流程。来源和能力确认仍由对应配置或交互结果提供；网络错误、重复确认失败及策略 block 不会被当作 warning。
 
 启用插件时会把真实插件 ID 合并到已有的非空 `plugins.allow`，保留其他 ID；不会新建一个限制所有其他插件的 allowlist。`plugins.enabled: false` 和 `plugins.deny` 的显式禁止会报错，需先调整用户配置。安装来源提醒和 `plugins.allow is empty` 是不同问题；后者可按实际信任范围在 partial JSON 中显式配置 `plugins.allow`。重启后再次验证插件是否启用。
 
@@ -101,7 +101,18 @@ deploy:
 
 策略目录整体通过 `nemoclaw <sandbox> policy add --from-dir ... --trusted-private-host ... --yes` 应用，单文件使用 `--from-file`。不会自动信任私网地址或重写用户 policy。自定义 policy 中不能使用 loopback；主机服务示例使用 `host.openshell.internal`，实际 URL、服务监听和网络策略必须相互匹配。
 
-自定义策略在 sandbox 预检查通过后立即应用，早于 agent 创建、内容上传、插件安装和 channel 配置。这样后续步骤失败时不会漏掉策略应用。日志列出策略文件和 NemoClaw 的处理结果；策略应用失败则立即停止，后续 agent 和插件步骤不会执行。`--dry-run` 和安装入口的 `--prepare-only` 仍只展示计划，不应用策略。
+自定义策略在 sandbox 预检查通过后立即应用，早于 agent 创建、内容上传、插件安装和 channel 配置。普通 stdout/stderr warning 会记录并继续；策略预检查或实际应用失败时按 `networkPolicy.continueOnError` 处理。默认 `false` 会停止；设为 `true` 则记录问题并继续后续步骤，最终摘要标记 `Network Policy: failed`，不会在最终验证时再次阻断。`--dry-run` 和安装入口的 `--prepare-only` 只展示计划，不应用策略。
+
+```yaml
+deploy:
+  shared:
+    options:
+      continueOnWarning: true
+    networkPolicy:
+      enabled: true
+      dir: ./policies
+      continueOnError: true
+```
 
 IEMS 安装包包含 4 份业务策略，由 `deploy.shared.networkPolicy.dir: ./policies` 加载。旧包部署中断后，可先在解压后的 IEMS 目录补应用，再查看实际生效状态：
 
@@ -128,10 +139,10 @@ IEMS 业务部署目录单独提供，不随 CLI 源码仓库提交。将其放�
 npm ci
 npm test
 npm pack
-PACKAGE_SPEC="$(pwd)/advantech-axa-nemoclaw-deploy-0.0.11.tgz" bash iems/install.sh
+PACKAGE_SPEC="$(pwd)/advantech-axa-nemoclaw-deploy-0.0.13.tgz" bash iems/install.sh
 ```
 
-已安装 CLI >=0.0.11 后预览：
+已安装 CLI >=0.0.13 后预览：
 
 ```bash
 bash iems/install.sh --non-interactive --dry-run
@@ -251,7 +262,7 @@ nemoclaw-deploy up --config onboard.yaml --dry-run
 
 不传 `--config` 时使用当前目录下的 `onboard.yaml`。
 
-`templates/install-and-up.sh` 没有随包 CLI 时优先复用脚本 prefix，其次复用 PATH 中版本 >=0.0.11 的 CLI；有随包 CLI 时验证 `packages/SHA256SUMS` 并按包内容 hash 复用，自动识别同版本修复。安装使用独立目录和原子入口切换，失败保留旧版本；同一 prefix 通过 `flock` 防止并发安装。设置 `FORCE_CLI_INSTALL=1` 可强制重装，`PACKAGE_SPEC=/path/package.tgz` 和可选 `PACKAGE_SHA256` 可指定本地包。`NPM_OFFLINE=1` 禁止 npm 联网：IEMS CLI 已携带按锁文件安装的生产依赖，可无缓存安装；其他自定义包仍可能需要缓存。
+`templates/install-and-up.sh` 没有随包 CLI 时优先复用脚本 prefix，其次复用 PATH 中版本 >=0.0.13 的 CLI；有随包 CLI 时验证 `packages/SHA256SUMS` 并按包内容 hash 复用，自动识别同版本修复。安装使用独立目录和原子入口切换，失败保留旧版本；同一 prefix 通过 `flock` 防止并发安装。设置 `FORCE_CLI_INSTALL=1` 可强制重装，`PACKAGE_SPEC=/path/package.tgz` 和可选 `PACKAGE_SHA256` 可指定本地包。`NPM_OFFLINE=1` 禁止 npm 联网：IEMS CLI 已携带按锁文件安装的生产依赖，可无缓存安装；其他自定义包仍可能需要缓存。
 
 `--prepare-only` 安装 Node.js/CLI 并校验完整计划，不安装 NemoClaw 或创建 sandbox；`--dry-run` 不安装任何依赖，需要已准备的 CLI。`--config` 在环境准备前解析，未知参数直接失败。`up` 会提前检查本地内容、skills、上传文件、OpenClaw partial 和 policy，避免在创建 sandbox 后才发现本地文件问题。
 
@@ -428,7 +439,9 @@ deploy:
 - `PYTHON=$VIRTUAL_ENV/bin/python`
 - `$VIRTUAL_ENV/bin` 位于 `PATH` 最前面
 
-`continueOnError: false` 时任一命令失败都会停止部署；设为 `true` 时继续后续命令，并在摘要中标记 `partial`。
+`continueOnError: false` 时任一命令失败都会停止部署；设为 `true` 时继续后续命令和其他 agent，在摘要中标记 `partial`。命令准备失败也遵守此选项。若失败导致已上传 skill 的依赖暂不可用，最终检查会记录 warning 并继续；agent 不存在、workspace 不匹配和文件缺失仍会明确报错。
+
+所有已记录 warning 和继续执行的失败会汇总到最终“警告 / 未成功步骤”，并显示“部署完成（有警告或未成功步骤）”。包含 warning 的 JSON、token 和 URL 输出仍按实际数据解析，不会因诊断信息混入而中断。
 
 ## OpenClaw partial 配置
 
@@ -450,9 +463,28 @@ deploy:
   → deploy.agents[].model
 ```
 
-partial 中适合配置 `models`、`channels`、`mcp`、`session`、`tools`、`cron` 和 `env`。不允许包含 `agents`；其他 OpenClaw 业务字段（包括 channel 的 `secret`）会直接合并，CLI 不额外拦截。省略的现有字段会保留，配置验证失败时会自动回滚。包含真实凭据的 partial 不要提交到版本库，并应限制本地文件权限。
+partial 中适合配置 `models`、`channels`、`mcp`、`session`、`tools`、`cron` 和 `env`。指定 agent 的配置使用 OpenClaw 的 `agents.entries` 格式：
 
-配置写入后会重新读取 sandbox 中的文件，核对 partial、插件、agent model 和 channel 是否完整保存；验证或 advbot 账号识别失败时回滚配置。全部操作和网关重启结束后还会再核对一次配置，若配置被其他命令修改或丢失，部署会明确报错，不会显示成功。临时核验文件仅保留在 sandbox，完成后清理。
+```json
+{
+  "agents": {
+    "entries": {
+      "ienergy-agent": {
+        "identity": { "name": "ienergy-agent" },
+        "tools": { "deny": ["write", "edit", "apply_patch"] }
+      }
+    }
+  }
+}
+```
+
+将这段内容放入 `openclawConfig.file` 指向的 partial，目标 agent 可由本次部署先创建，也可以已存在于 sandbox。CLI 按 agent ID 合并对象，省略字段和其他 agent 保留；`tools.deny` 等数组整体替换，`null` 删除普通字段。也支持旧式 `agents.list` 数组，每项必须提供 `id`，合并时不转换 sandbox 的现有存储格式。
+
+partial 不能新建或删除 agent，不能同时包含 `agents.entries` 和 `agents.list`，也不能修改 `agents.defaults`、`agents.ownership`。`workspace` 和 `agentDir` 建议省略；如填写，必须与 sandbox 中的现有值一致。`deploy.agents[].model` 显式值优先于 partial 的 model，未填写则保留合并结果。
+
+其他 OpenClaw 业务字段（包括 channel 的 `secret`）会直接合并，配置验证失败时自动回滚。包含真实凭据的 partial 不要提交到版本库，并应限制本地文件权限。
+
+配置写入后会重新读取 sandbox 中的文件，核对 partial、插件、agent 配置和 channel 是否完整保存；验证或 advbot 账号识别失败时回滚配置。全部操作和网关重启结束后还会再核对一次配置，若配置被其他命令修改或丢失，部署会明确报错，不会显示成功。临时核验文件仅保留在 sandbox，完成后清理。
 
 ## ChannelServer 和 advbot 配置
 

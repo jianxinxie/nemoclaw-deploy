@@ -1,4 +1,5 @@
 import { runCommand } from '../utils/run.js';
+import { parseJsonOutput } from '../utils/output.js';
 import {
   assertMinimumVersion,
   assertOpenClawNodeVersion,
@@ -9,7 +10,7 @@ import {
 export function assertSandboxRunning(output: string): void {
   let status: { found?: boolean; phase?: string; gatewayState?: string; rpcIssue?: unknown; failureLayer?: unknown };
   try {
-    status = JSON.parse(output);
+    status = parseJsonOutput(output, 'sandbox status --json');
   } catch {
     throw new Error('无法解析 sandbox status --json 返回的状态');
   }

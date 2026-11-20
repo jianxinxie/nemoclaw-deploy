@@ -5,6 +5,11 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 const root = process.env.TEST_ROOT;
+if (process.env.TEST_WARNING_OUTPUT) {
+  console.log('WARNING: fixture diagnostic before command');
+  console.error('WARNING: fixture stderr diagnostic');
+  process.on('exit', () => process.stdout.write('\nWARNING: fixture diagnostic after command\n'));
+}
 fs.appendFileSync(path.join(root, 'calls.jsonl'), JSON.stringify(args) + '\n');
 fs.appendFileSync(path.join(root, 'command-env.jsonl'), JSON.stringify({
   args, dashboardBind: process.env.NEMOCLAW_DASHBOARD_BIND ?? null
@@ -46,8 +51,15 @@ if (args[0] === '--version') {
   const configFile = path.join(root, 'openclaw.json');
   const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
   config.agents ??= {};
-  config.agents.list ??= [];
-  config.agents.list.push(list.at(-1));
+  if (process.env.TEST_AGENT_ENTRIES) {
+    config.agents.ownership ??= 'explicit';
+    config.agents.entries ??= {};
+    const { id, workspace } = list.at(-1);
+    config.agents.entries[id] = { name: id, workspace };
+  } else {
+    config.agents.list ??= [];
+    config.agents.list.push(list.at(-1));
+  }
   fs.writeFileSync(configFile, JSON.stringify(config));
 } else if (args[1] === 'gateway-token') {
   if (process.env.TEST_GATEWAY_FAILURE) { console.error('gateway token unavailable'); process.exit(1); }
@@ -63,7 +75,11 @@ if (args[0] === '--version') {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.cpSync(source, target, { recursive: true });
 } else if (args[1] === 'policy' && args[2] === 'add') {
-  if (process.env.TEST_POLICY_FAILURE) { console.error('policy rejected by upstream'); process.exit(1); }
+  if (process.env.TEST_POLICY_WARNING_ONLY) console.error('WARNING: policy contains an advisory notice');
+  if (process.env.TEST_POLICY_FAILURE) {
+    console.error(process.env.TEST_POLICY_FAILURE === 'warning' ? 'WARNING: policy update did not complete' : 'policy rejected by upstream');
+    process.exit(1);
+  }
   const directory = args.includes('--from-dir');
   const source = args[args.indexOf(directory ? '--from-dir' : '--from-file') + 1];
   const files = directory ? fs.readdirSync(source).filter(name => /\.ya?ml$/i.test(name)).sort()
@@ -165,7 +181,7 @@ if (args[0] === '--version') {
         if (fs.existsSync(file)) {
           skills.push({ name: fs.readFileSync(file, 'utf8').match(/^name: (.+)$/m)[1],
             source: process.env.TEST_WRONG_SKILL_SCOPE ? 'openclaw-managed' : 'openclaw-workspace',
-            eligible: true });
+            eligible: process.env.TEST_SKILL_UNREADY !== id });
           return;
         }
         for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
@@ -176,6 +192,9 @@ if (args[0] === '--version') {
       json({ workspaceDir: agent.workspace, skills });
     } else throw new Error('Unexpected OpenClaw command: ' + command.join(' '));
   } else if (command[0] === 'mkdir') {
+    if (process.env.TEST_COMMAND_SETUP_FAILURE && command.at(-1).includes(`/${process.env.TEST_COMMAND_SETUP_FAILURE}/sandbox-commands`)) {
+      console.error('cannot prepare sandbox command directory'); process.exit(23);
+    }
     fs.mkdirSync(mapPath(command.at(-1)), { recursive: true });
   } else if (command[0] === 'rm') {
     const target = mapPath(command.at(-1));

@@ -5,6 +5,7 @@ import type { DeployContext } from './context.js';
 import { createIgnoreMatcher } from '../utils/ignore.js';
 import { runCommand } from '../utils/run.js';
 import { logger } from '../utils/logger.js';
+import { parseJsonOutput } from '../utils/output.js';
 
 export interface WorkspaceSkill {
   name: string;
@@ -60,7 +61,7 @@ export async function collectWorkspaceSkills(hostDir: string, ignore: string[]):
   return skills;
 }
 
-export async function verifyWorkspaceSkills(ctx: DeployContext, expected: WorkspaceSkill[]): Promise<void> {
+export async function verifyWorkspaceSkills(ctx: DeployContext, expected: WorkspaceSkill[], allowUnready = false): Promise<void> {
   if (expected.length === 0 || ctx.options.dryRun) return;
   const result = await runCommand('nemoclaw', [
     ctx.sandboxName, 'exec', '--', 'openclaw', 'skills', 'list', '--agent', ctx.agentName, '--json'
@@ -70,7 +71,7 @@ export async function verifyWorkspaceSkills(ctx: DeployContext, expected: Worksp
     blockedByAllowlist?: boolean; blockedByAgentFilter?: boolean;
   }> };
   try {
-    report = JSON.parse(result.stdout);
+    report = parseJsonOutput(result.stdout, 'skills list --json');
   } catch {
     throw new Error(`无法解析 agent ${ctx.agentName} 的 skills list --json 输出`);
   }
@@ -82,8 +83,12 @@ export async function verifyWorkspaceSkills(ctx: DeployContext, expected: Worksp
       throw new Error(`agent ${ctx.agentName} 未从自己的 workspace 发现 skill ${skill.name}（期望 ${expectedPath}）`);
     }
     if (found.eligible !== true || found.disabled || found.blockedByAllowlist || found.blockedByAgentFilter) {
+      if (allowUnready) {
+        logger.warn(`agent ${ctx.agentName} 的 skill ${skill.name} 已上传但尚不可用；命令步骤已按 continueOnError=true 继续，请检查依赖、环境变量及 allowlist。`);
+        continue;
+      }
       throw new Error(`agent ${ctx.agentName} 的 skill ${skill.name} 尚不可用，请检查技能依赖、环境变量及 allowlist`);
     }
   }
-  logger.info(`agent ${ctx.agentName}: 已验证 ${expected.length} 个 workspace skills。`);
+  logger.info(`agent ${ctx.agentName}: 已检查 ${expected.length} 个 workspace skills。`);
 }

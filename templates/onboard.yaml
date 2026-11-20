@@ -77,12 +77,13 @@ deploy:
           trustSource: false
           # 审查插件声明的能力后设为 true；安装时传入 --accept-capabilities。
           acceptCapabilities: false
-          # 仅明确接受 security.installPolicy 的 warn 时开启；不会绕过 block。
+          # 可提前确认策略 warn；options.continueOnWarning=true 也会在遇到 warn 时自动确认。
           acknowledgeInstallPolicyWarning: false
           # 需要重装已安装插件时才开启。
           force: false
 
     # OpenClaw 的 models、tools、channels 等配置从 partial 文件合并。
+    # 指定 agent 的 tools 等字段放在 agents.entries.<agentId>；省略 workspace 和 agentDir。
     openclawConfig:
       enabled: false
       file: ./openclaw.json
@@ -100,10 +101,14 @@ deploy:
       dir: ./policies
       # 私网服务需显式列出精确主机名/IP；目录整体应用。
       trustedPrivateHosts: []
+      # true 时策略应用失败仍继续，最终摘要会标记 failed。
+      continueOnError: false
 
     options:
       # 所有 agent 和共享配置处理完成后，只重启一次 gateway。
       restartGateway: true
+      # 普通 warning 继续，并自动确认插件安装策略的 warn。
+      continueOnWarning: true
 
   agents:
     - name: my-agent

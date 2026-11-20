@@ -121,7 +121,7 @@ test('two agents receive isolated workspace skills; new policy command batches p
   assert(!calls.some((args) => args[1] === 'skill' || args[1] === 'policy-add'));
   assert.deepEqual(calls.filter((args) => args.includes('skills')).map((args) => args[args.indexOf('--agent') + 1]), ['alpha', 'beta']);
   assert.equal(calls.filter((args) => args[1] === 'gateway').length, 1);
-  assert.match(result.stdout, /workspace verified \(1\)/);
+  assert.match(result.stdout, /workspace checked \(1\)/);
 });
 
 test('repeat deployment defaults to conflict failure and preserves existing content', async (t) => {
@@ -415,6 +415,157 @@ process.exit(98);
   assert.equal(calls.filter(args => args[1] === 'gateway').length, 2, 'restart once per deployment');
 });
 
+async function configureAgentOverlay(f, partial) {
+  const partialPath = path.join(f.root, 'agent-overlay.json');
+  await fs.writeFile(partialPath, JSON.stringify(partial));
+  f.config.deploy.shared.openclawConfig = { enabled: true, file: './agent-overlay.json' };
+  f.config.deploy.shared.networkPolicy.enabled = false;
+  for (const agent of f.config.deploy.agents) agent.agentContent.enabled = false;
+  await f.write();
+  return partialPath;
+}
+
+test('agent partial merges tools into native entries, preserves other agents and survives repeat deploy', async t => {
+  const f = await fixture(t);
+  const alpha = f.config.deploy.agents[0];
+  alpha.model = 'custom/explicit-model';
+  const agentDir = '/sandbox/.openclaw/agents/alpha/agent';
+  const unrelated = { name: 'unrelated', workspace: '/sandbox/unrelated', tools: { deny: ['exec'] } };
+  const initial = {
+    tools: { profile: 'coding' },
+    agents: { defaults: { model: 'custom/default-model' }, ownership: 'explicit', entries: {
+      alpha: { name: 'alpha', workspace: alpha.workspace, agentDir,
+        identity: { name: 'Old name', emoji: '⚡' },
+        tools: { profile: 'minimal', deny: ['exec'], exec: { ask: 'always' } } },
+      unrelated
+    } }
+  };
+  const configPath = path.join(f.root, 'openclaw.json');
+  await fs.writeFile(configPath, JSON.stringify(initial));
+  await fs.writeFile(path.join(f.root, 'agents.json'), JSON.stringify([{ id: 'alpha', workspace: alpha.workspace }]));
+  const partialPath = await configureAgentOverlay(f, { agents: { entries: { alpha: {
+    name: 'alpha', workspace: alpha.workspace, agentDir, identity: { name: 'Alpha' },
+    model: 'custom/overlay-model', tools: { deny: ['write', 'edit', 'apply_patch'] }
+  } } } });
+  const partialText = await fs.readFile(partialPath, 'utf8');
+  let firstSaved;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = f.run([], { TEST_AGENT_ENTRIES: '1', TEST_WARNING_OUTPUT: '1' });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const saved = JSON.parse(await fs.readFile(configPath, 'utf8'));
+    assert.equal(saved.agents.list, undefined);
+    assert.deepEqual(saved.tools, initial.tools);
+    assert.deepEqual(saved.agents.defaults, initial.agents.defaults);
+    assert.deepEqual(saved.agents.ownership, initial.agents.ownership);
+    assert.deepEqual(saved.agents.entries.unrelated, unrelated);
+    assert.deepEqual(saved.agents.entries.alpha, {
+      name: 'alpha', workspace: alpha.workspace, agentDir, identity: { name: 'Alpha', emoji: '⚡' },
+      tools: { profile: 'minimal', deny: ['write', 'edit', 'apply_patch'], exec: { ask: 'always' } },
+      model: 'custom/explicit-model'
+    });
+    assert.equal(saved.agents.entries.beta.workspace, f.config.deploy.agents[1].workspace);
+    assert.equal(saved.agents.entries.beta.tools, undefined);
+    if (firstSaved) assert.deepEqual(saved, firstSaved);
+    firstSaved = saved;
+    assert.match(result.stdout, /部署完成/);
+  }
+  assert.equal(await fs.readFile(partialPath, 'utf8'), partialText, 'host partial stays unchanged');
+  assert.equal((await f.calls()).filter(args => args[1] === 'agents' && args[2] === 'add').length, 1);
+});
+
+test('agent partial adapts entries and legacy list without replacing or migrating the roster', async t => {
+  for (const native of [false, true]) {
+    await t.test(native ? 'list partial to native entries' : 'entries partial to legacy list', async t => {
+      const f = await fixture(t);
+      const records = f.config.deploy.agents.map(agent => ({ id: agent.name, workspace: agent.workspace }));
+      await fs.writeFile(path.join(f.root, 'agents.json'), JSON.stringify(records));
+      const alpha = { name: 'alpha', workspace: records[0].workspace,
+        tools: { profile: 'coding', deny: ['exec'], exec: { ask: 'always' } } };
+      const beta = { name: 'beta', workspace: records[1].workspace, tools: { deny: ['browser'] } };
+      const roster = native ? { ownership: 'explicit', entries: { alpha, beta } }
+        : { list: [{ id: 'alpha', ...alpha }, { id: 'beta', ...beta }] };
+      const configPath = path.join(f.root, 'openclaw.json');
+      await fs.writeFile(configPath, JSON.stringify({ agents: roster }));
+      const patch = { tools: { deny: ['write', 'edit', 'apply_patch'], exec: null } };
+      await configureAgentOverlay(f, { agents: native ? { list: [{ id: 'alpha', ...patch }] }
+        : { entries: { alpha: patch } } });
+      const result = f.run();
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const saved = JSON.parse(await fs.readFile(configPath, 'utf8')).agents;
+      const target = native ? saved.entries.alpha : saved.list.find(agent => agent.id === 'alpha');
+      assert.deepEqual(target.tools, { profile: 'coding', deny: ['write', 'edit', 'apply_patch'] });
+      assert.equal(target.workspace, records[0].workspace);
+      if (native) {
+        assert.equal(saved.list, undefined);
+        assert.equal(target.id, undefined);
+        assert.deepEqual(saved.entries.beta, beta);
+      } else {
+        assert.equal(saved.entries, undefined);
+        assert.equal(saved.list.length, 2);
+        assert.equal(target.id, 'alpha');
+        assert.deepEqual(saved.list[1], { id: 'beta', ...beta });
+      }
+    });
+  }
+});
+
+test('malformed agent partials fail preflight before external commands', async t => {
+  const f = await fixture(t);
+  for (const agents of [
+    null, [], { entries: null }, { entries: [] }, { entries: { alpha: null } },
+    { entries: { alpha: { id: 'beta' } } }, { entries: { alpha: { workspace: null } } },
+    { entries: { alpha: { agentDir: '' } } }, { entries: { 'invalid/name': {} } },
+    { entries: { alpha: {}, ALPHA: {} } }, { list: [{ id: 'alpha' }, { id: 'alpha' }] },
+    { list: [{ name: 'alpha' }] }, { list: null }, { entries: {}, list: [] },
+    { defaults: { tools: { deny: ['write'] } } }
+  ]) {
+    await configureAgentOverlay(f, { agents });
+    const result = f.run();
+    assert.equal(result.status, 1, JSON.stringify(agents) + result.stdout + result.stderr);
+    assert.match(result.stderr, /agent/i);
+    assert.deepEqual(await f.calls(), []);
+  }
+});
+
+test('agent partial cannot create agents or change directories and makes no partial config write', async t => {
+  const f = await fixture(t);
+  const records = f.config.deploy.agents.map(agent => ({ id: agent.name, workspace: agent.workspace }));
+  await fs.writeFile(path.join(f.root, 'agents.json'), JSON.stringify(records));
+  const configPath = path.join(f.root, 'openclaw.json');
+  const original = JSON.stringify({ agents: { entries: Object.fromEntries(records.map(({ id, workspace }) =>
+    [id, { name: id, workspace, agentDir: `/sandbox/.openclaw/agents/${id}/agent` }])) } });
+  await fs.writeFile(configPath, original);
+  for (const [entries, expected] of [
+    [{ alpha: { tools: { deny: ['write'] } }, unknown: { tools: { deny: ['edit'] } } }, /unique agent: unknown/],
+    [{ alpha: { workspace: '/sandbox/another-workspace' } }, /cannot change workspace/],
+    [{ alpha: { agentDir: '/sandbox/another-agent' } }, /cannot change agentDir/]
+  ]) {
+    await configureAgentOverlay(f, { tools: { profile: 'minimal' }, agents: { entries } });
+    const result = f.run();
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, expected);
+    assert.equal(await fs.readFile(configPath, 'utf8'), original);
+    assert.doesNotMatch(result.stdout, /部署完成/);
+  }
+});
+
+test('per-agent tools overlay rolls back when config validation fails', async t => {
+  const f = await fixture(t);
+  const records = f.config.deploy.agents.map(agent => ({ id: agent.name, workspace: agent.workspace }));
+  await fs.writeFile(path.join(f.root, 'agents.json'), JSON.stringify(records));
+  const configPath = path.join(f.root, 'openclaw.json');
+  const original = JSON.stringify({ agents: { entries: Object.fromEntries(records.map(({ id, workspace }) =>
+    [id, { name: id, workspace, tools: { deny: ['exec'] } }])) } });
+  await fs.writeFile(configPath, original);
+  await configureAgentOverlay(f, { session: { dmScope: 'per-channel-peer' },
+    agents: { entries: { alpha: { tools: { deny: ['write', 'edit', 'apply_patch'] } } } } });
+  const result = f.run([], { TEST_CONFIG_INVALID: '1' });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /已恢复写入前配置/);
+  assert.equal(await fs.readFile(configPath, 'utf8'), original);
+  assert(!(await f.calls()).some(args => args[1] === 'gateway'));
+});
+
 test('an existing channel with a stale token is refreshed from the current gateway', async (t) => {
   const f = await fixture(t);
   await configureChannelOverlay(f);
@@ -546,6 +697,7 @@ test('missing plugin consent is actionable and policy blocks remain terminal aft
     [{ TEST_PLUGIN_POLICY_BLOCK: '1' }, { acknowledgeInstallPolicyWarning: true }, /security.installPolicy blocked/]
   ]) {
     const f = await fixture(t);
+    f.config.deploy.shared.options.continueOnWarning = false;
     f.config.deploy.shared.plugins = { enabled: true,
       items: [{ id: 'advbot', source: '@advantech-axa/advbot', trustSource: true, ...consent }] };
     await f.write();
@@ -639,6 +791,7 @@ async function runPluginTrustPrompt(f, accepted, overrides = {}) {
     const plan = await collectDeployPlan({ config: process.env.TEST_CONFIG, nonInteractive: true });
     const ctx = plan.agents[0];
     ctx.options.nonInteractive = false;
+    ctx.options.continueOnWarning = false;
     try { await installPlugins(ctx); }
     catch (error) { console.error(error.message); process.exitCode = 1; }
   `;
@@ -838,7 +991,7 @@ test('shell dry-run rejects an old deploy CLI without installing packages', asyn
     encoding: 'utf8', timeout: 10_000
   });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /预先安装 nemoclaw-deploy >= 0.0.11/);
+  assert.match(result.stderr, /预先安装 nemoclaw-deploy >= 0.0.13/);
   await assert.rejects(fs.access(npmMarker));
   assert.deepEqual(await f.calls(), []);
 });
@@ -863,5 +1016,64 @@ test('interactive plugin install confirms each required consent and never retrie
     assert.equal(installs.length, scenario === 'decline' ? 1 : scenario === 'repeated-gate' ? 2 : 3);
     if (scenario === 'block') assert.match(result.stderr, /security.installPolicy blocked/);
     assert.equal(await fs.readFile(f.configPath, 'utf8'), original);
+  }
+});
+
+test('warnings around command data and policy stderr never stop deployment', async t => {
+  const f = await fixture(t);
+  await configureChannelOverlay(f);
+  const result = f.run([], { TEST_WARNING_OUTPUT: '1', TEST_POLICY_WARNING_ONLY: '1' });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /部署完成.*警告/);
+  assert.match(result.stdout, /Network Policy\s+applied/);
+  assert.match(result.stdout, /警告 \/ 未成功步骤/);
+  const config = JSON.parse(await fs.readFile(path.join(f.root, 'openclaw.json'), 'utf8'));
+  assert.equal(config.channels.advbot.accounts.ec.gatewayToken, 'test-current-gateway-token-123456789');
+  assert.equal(config.channels.advbot.accounts.ec.gatewayUrl, 'wss://gateway.example.com:18791');
+});
+
+test('policy continueOnError allows later deployment and reports failure without final verification abort', async t => {
+  for (const failure of ['1', 'warning', 'missing-file']) {
+    const f = await fixture(t);
+    f.config.deploy.shared.networkPolicy.continueOnError = true;
+    if (failure === 'missing-file') f.config.deploy.shared.networkPolicy.dir = path.join(f.root, 'missing-policy.yaml');
+    await f.write();
+    const result = f.run([], failure === 'missing-file' ? {} : { TEST_POLICY_FAILURE: failure });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /部署完成.*警告/);
+    assert.match(result.stdout, /Network Policy\s+failed/);
+    assert.doesNotMatch(result.stdout, /个 network policy 文件已应用/);
+    assert.equal(JSON.parse(await fs.readFile(path.join(f.root, 'agents.json'), 'utf8')).length, 2);
+    assert((await f.calls()).some(args => args[1] === 'gateway'));
+  }
+});
+
+test('continued command failures and setup errors do not block later agents or unready skill checks', async t => {
+  for (const setupFailure of [false, true]) {
+    const f = await fixture(t);
+    f.config.deploy.agents[0].sandbox.commands = { enabled: true, continueOnError: true, items: ['false'] };
+    f.config.deploy.agents[1].sandbox.commands = { enabled: true, continueOnError: false, items: ['printf continued > continued.txt'] };
+    await f.write();
+    const result = f.run([], { TEST_SKILL_UNREADY: 'alpha', ...(setupFailure ? { TEST_COMMAND_SETUP_FAILURE: 'alpha' } : {}) });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /partial/);
+    assert.match(result.stdout, /部署完成.*警告/);
+    assert.match(result.stderr, /skill demo 已上传但尚不可用/);
+    assert.equal(await fs.readFile(path.join(f.config.deploy.agents[1].workspace, 'continued.txt'), 'utf8'), 'continued');
+  }
+});
+
+test('install policy warnings are acknowledged automatically but policy blocks remain failures', async t => {
+  for (const block of [false, true]) {
+    const f = await fixture(t);
+    f.config.deploy.shared.plugins = { enabled: true, items: [{ id: 'advbot', source: '@advantech-axa/advbot', trustSource: true }] };
+    await f.write();
+    const result = f.run([], { TEST_PLUGIN_POLICY_WARNING: '1', ...(block ? { TEST_PLUGIN_POLICY_BLOCK: '1' } : {}) });
+    assert.equal(result.status, block ? 1 : 0, result.stdout + result.stderr);
+    const installs = pluginInstalls(await f.calls());
+    assert.equal(installs.length, 2);
+    assert(installs[1].includes('--acknowledge-install-policy-warning'));
+    if (block) assert.match(result.stderr, /security.installPolicy blocked/);
+    else assert.match(result.stdout, /部署完成.*警告/);
   }
 });

@@ -23,9 +23,10 @@ export async function executeSandboxCommands(
   logger.info(`将在 sandbox 的 ${ctx.sandbox.commands.workingDir} 下执行 ${ctx.sandbox.commands.items.length} 条命令。`);
 
   const remoteDir = `${remoteTempBase(ctx)}/sandbox-commands`;
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nemoclaw-deploy-commands-'));
+  let tempDir: string | undefined;
 
   try {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nemoclaw-deploy-commands-'));
     await runCommand('nemoclaw', [ctx.sandboxName, 'exec', '--', 'mkdir', '-p', remoteDir], {
       dryRun: ctx.options.dryRun,
       description: '创建 sandbox 临时目录，用于暂存命令脚本'
@@ -75,8 +76,12 @@ export async function executeSandboxCommands(
         logger.warn(`sandbox 命令失败，已按 continueOnError=true 继续：${detail}`);
       }
     }
+  } catch (error) {
+    if (!ctx.sandbox.commands.continueOnError) throw error;
+    logger.warn(`sandbox 命令准备或执行失败，已按 continueOnError=true 继续后续 agent：${error instanceof Error ? error.message : String(error)}`);
   } finally {
-    await fs.remove(tempDir);
+    try { if (tempDir) await fs.remove(tempDir); }
+    catch (error) { logger.warn(`本地命令临时文件清理未完成：${error instanceof Error ? error.message : String(error)}`); }
   }
 
   return {

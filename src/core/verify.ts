@@ -7,6 +7,7 @@ import { verifyWorkspaceSkills, type WorkspaceSkill } from './workspace-skills.j
 export interface VerifyOptions {
   policyApplied: boolean;
   skills?: WorkspaceSkill[];
+  allowUnreadySkills?: boolean;
 }
 
 export async function verifyDeployment(ctx: DeployContext, options: VerifyOptions): Promise<void> {
@@ -24,7 +25,7 @@ export async function verifyDeployment(ctx: DeployContext, options: VerifyOption
     description: '验证 sandbox 状态仍然可读取'
   });
   if (!ctx.options.dryRun) assertSandboxRunning(status.stdout);
-  await verifyWorkspaceSkills(ctx, options.skills ?? []);
+  await verifyWorkspaceSkills(ctx, options.skills ?? [], options.allowUnreadySkills);
 
   if (ctx.channelServer.enabled) {
     if (!ctx.channelServer.gatewayToken) throw new Error('验证失败：gatewayToken 未获取');
@@ -32,7 +33,7 @@ export async function verifyDeployment(ctx: DeployContext, options: VerifyOption
     if (!ctx.channelServer.url) throw new Error('验证失败：ChannelServer URL 未填写');
   }
 
-  if (ctx.networkPolicy.enabled && !options.policyApplied) {
+  if (ctx.networkPolicy.enabled && !options.policyApplied && !ctx.networkPolicy.continueOnError) {
     throw new Error('验证失败：network policy 未成功应用');
   }
 }

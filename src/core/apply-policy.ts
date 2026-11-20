@@ -6,7 +6,7 @@ import { collectNetworkPolicyFiles } from '../utils/validators.js';
 import { readYamlFile } from '../utils/yaml.js';
 
 export interface ApplyPolicyResult {
-  status: 'skipped' | 'applied';
+  status: 'skipped' | 'applied' | 'failed';
   count: number;
 }
 
@@ -42,19 +42,25 @@ export async function validateNetworkPolicies(ctx: DeployContext): Promise<strin
 
 export async function applyPolicy(ctx: DeployContext): Promise<ApplyPolicyResult> {
   if (!ctx.networkPolicy.enabled) return { status: 'skipped', count: 0 };
-  const files = await validateNetworkPolicies(ctx);
-  const source = ctx.networkPolicy.dir!;
-  const isDirectory = (await fs.stat(source)).isDirectory();
-  logger.info(`应用 ${files.length} 个 network policy 文件。`);
-  for (const file of files) logger.info(`  Policy File: ${file}`);
-  const result = await runCommand('nemoclaw', [
-    ctx.sandboxName, 'policy', 'add', isDirectory ? '--from-dir' : '--from-file', source,
-    ...ctx.networkPolicy.trustedPrivateHosts.flatMap((host) => ['--trusted-private-host', host]), '--yes'
-  ], { dryRun: ctx.options.dryRun, description: '使用 NemoClaw 正式 policy add 命令应用策略及显式私网信任' });
-  if (!ctx.options.dryRun) {
-    if (result.stdout.trim()) logger.info(result.stdout.trim());
-    if (result.stderr.trim()) logger.warn(result.stderr.trim());
-    logger.success(`Sandbox ${ctx.sandboxName} 的 ${files.length} 个 network policy 文件已应用。`);
+  try {
+    const files = await validateNetworkPolicies(ctx);
+    const source = ctx.networkPolicy.dir!;
+    const isDirectory = (await fs.stat(source)).isDirectory();
+    logger.info(`应用 ${files.length} 个 network policy 文件。`);
+    for (const file of files) logger.info(`  Policy File: ${file}`);
+    const result = await runCommand('nemoclaw', [
+      ctx.sandboxName, 'policy', 'add', isDirectory ? '--from-dir' : '--from-file', source,
+      ...ctx.networkPolicy.trustedPrivateHosts.flatMap((host) => ['--trusted-private-host', host]), '--yes'
+    ], { dryRun: ctx.options.dryRun, description: '使用 NemoClaw 正式 policy add 命令应用策略及显式私网信任' });
+    if (!ctx.options.dryRun) {
+      if (result.stdout.trim()) logger.info(result.stdout.trim());
+      if (result.stderr.trim()) logger.warn(result.stderr.trim());
+      logger.success(`Sandbox ${ctx.sandboxName} 的 ${files.length} 个 network policy 文件已应用。`);
+    }
+    return { status: 'applied', count: files.length };
+  } catch (error) {
+    if (!ctx.networkPolicy.continueOnError) throw error;
+    logger.warn(`network policy 应用未成功，已按 networkPolicy.continueOnError=true 继续后续部署：\n${error instanceof Error ? error.message : String(error)}`);
+    return { status: 'failed', count: 0 };
   }
-  return { status: 'applied', count: files.length };
 }

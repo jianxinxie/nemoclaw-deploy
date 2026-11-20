@@ -97,6 +97,7 @@ export interface DeployContext {
     enabled: boolean;
     dir?: string;
     trustedPrivateHosts: string[];
+    continueOnError: boolean;
   };
 
   env: {
@@ -108,6 +109,7 @@ export interface DeployContext {
 
   options: {
     restartGateway: boolean;
+    continueOnWarning: boolean;
     nonInteractive: boolean;
     dryRun: boolean;
   };
@@ -183,11 +185,13 @@ const channelServerSchema = z.object({
 const networkPolicySchema = z.object({
   enabled: z.boolean().optional(),
   dir: z.string().optional(),
-  trustedPrivateHosts: z.array(z.string()).optional()
+  trustedPrivateHosts: z.array(z.string()).optional(),
+  continueOnError: z.boolean().optional()
 }).strict().optional();
 
 const deployOptionsSchema = z.object({
-  restartGateway: z.boolean().optional()
+  restartGateway: z.boolean().optional(),
+  continueOnWarning: z.boolean().optional()
 }).strict().optional();
 
 const sharedDeploySchema = z.object({
@@ -538,7 +542,8 @@ async function collectOneDeployContext(
     networkPolicy: {
       enabled: networkPolicyEnabled,
       dir: networkPolicyDir,
-      trustedPrivateHosts: [...new Set((config.networkPolicy?.trustedPrivateHosts ?? []).map(validateTrustedPrivateHost))]
+      trustedPrivateHosts: [...new Set((config.networkPolicy?.trustedPrivateHosts ?? []).map(validateTrustedPrivateHost))],
+      continueOnError: config.networkPolicy?.continueOnError ?? false
     },
     env: {
       enabled: envEnabled,
@@ -548,6 +553,7 @@ async function collectOneDeployContext(
     },
     options: {
       restartGateway: config.options?.restartGateway ?? true,
+      continueOnWarning: config.options?.continueOnWarning ?? true,
       nonInteractive: Boolean(options.nonInteractive),
       dryRun: Boolean(options.dryRun)
     }

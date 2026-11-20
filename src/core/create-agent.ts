@@ -2,6 +2,7 @@ import type { DeployContext } from './context.js';
 import { logger } from '../utils/logger.js';
 import { runCommand } from '../utils/run.js';
 import { validateWorkspace } from '../utils/validators.js';
+import { parseJsonOutput } from '../utils/output.js';
 
 export async function createAgent(ctx: DeployContext): Promise<void> {
   const initialListResult = await runCommand(
@@ -114,15 +115,9 @@ function syncExistingAgentContext(ctx: DeployContext, raw: string): boolean {
 }
 
 function parseAgentList(raw: string): unknown {
-  // OpenClaw plugin discovery may log before the JSON document. Only accept
-  // a complete object/array, never a textual mention of an agent name.
-  for (const match of raw.matchAll(/(?:^|\n)[ \t]*([\[{])/g)) {
-    try {
-      const value: unknown = JSON.parse(raw.slice(match.index! + match[0].length - 1).trim());
-      if (value && typeof value === 'object') return value;
-    } catch { /* Try the next line that could begin the JSON document. */ }
-  }
-  throw new Error('Invalid agents JSON');
+  const value = parseJsonOutput(raw, 'agents list --json');
+  if (!value || typeof value !== 'object') throw new Error('Invalid agents JSON');
+  return value;
 }
 
 function findAgentRecord(value: unknown, agentName: string): Record<string, unknown> | undefined {

@@ -7,6 +7,8 @@ import { verifyAdvbotChannelSupported } from './configure-channel.js';
 import type { InstallPluginsResult, PluginConfigPlan } from './install-plugins.js';
 import { remoteTempBase } from './upload-agent-content.js';
 import { runCommand } from '../utils/run.js';
+import { parseJsonOutput } from '../utils/output.js';
+import { parseAgentConfigPatches } from './agent-config.js';
 
 export interface ApplyOpenClawConfigResult {
   status: 'unchanged' | 'applied';
@@ -162,7 +164,7 @@ export async function verifyOpenClawConfig(ctx: DeployContext): Promise<void> {
       dryRun: ctx.options.dryRun,
       sensitive: true,
       timeoutMs: 30_000,
-      description: '重新读取 OpenClaw 配置，确认 partial JSON、agent model 和 advbot channel 已完整保存'
+      description: '重新读取 OpenClaw 配置，确认 partial JSON、agent 配置和 advbot channel 已完整保存'
     }
   );
 }
@@ -221,7 +223,7 @@ async function rollbackOpenClawConfig(
 function parseChanged(stdout: string, dryRun: boolean): boolean {
   if (dryRun) return true;
   try {
-    const result = JSON.parse(stdout) as { changed?: unknown };
+    const result = parseJsonOutput<{ changed?: unknown }>(stdout);
     if (typeof result.changed !== 'boolean') throw new Error('missing changed');
     return result.changed;
   } catch {
@@ -234,9 +236,7 @@ function assertValidPartialConfig(value: unknown): asserts value is Record<strin
     throw new Error('openclawConfig.file 顶层必须是 JSON 对象');
   }
   if (Object.prototype.hasOwnProperty.call(value, 'agents')) {
-    throw new Error(
-      'openclawConfig.file 不允许包含 agents；agent 创建和 workspace 交给 OpenClaw，model 请配置在 deploy.agents[].model'
-    );
+    parseAgentConfigPatches(value.agents);
   }
 }
 
@@ -306,6 +306,31 @@ function deepMerge(target, source) {
   return out;
 }
 
+${parseAgentConfigPatches.toString()}
+
+function findAgentSlot(config, agentId) {
+  const entries = isPlainObject(config.agents) && config.agents.entries;
+  if (isPlainObject(entries)) {
+    const keys = Object.keys(entries).filter(key => key.toLowerCase() === agentId.toLowerCase());
+    if (keys.length !== 1 || !isPlainObject(entries[keys[0]])) {
+      throw new Error('OpenClaw config does not contain a unique agent: ' + agentId);
+    }
+    const key = keys[0];
+    return { value: entries[key], write: value => { entries[key] = value; } };
+  }
+  const list = Array.isArray(config.agents) ? config.agents
+    : isPlainObject(config.agents) && Array.isArray(config.agents.list) ? config.agents.list : null;
+  if (!list) throw new Error('OpenClaw config does not contain agents.entries or agents.list');
+  const indexes = list.flatMap((entry, index) => {
+    if (!isPlainObject(entry)) return [];
+    const id = entry.id ?? entry.agentName ?? entry.name;
+    return typeof id === 'string' && id.toLowerCase() === agentId.toLowerCase() ? [index] : [];
+  });
+  if (indexes.length !== 1) throw new Error('OpenClaw config does not contain a unique agent: ' + agentId);
+  const index = indexes[0];
+  return { value: list[index], write: value => { list[index] = value; } };
+}
+
 const originalText = fs.readFileSync(configPath, 'utf8');
 const original = JSON.parse(originalText);
 let next = clone(original);
@@ -313,10 +338,18 @@ let next = clone(original);
 if (partialFile) {
   const partial = JSON.parse(fs.readFileSync(partialFile, 'utf8'));
   if (!isPlainObject(partial)) throw new Error('openclaw partial config must be an object');
-  if (Object.prototype.hasOwnProperty.call(partial, 'agents')) {
-    throw new Error('openclaw partial config must not contain agents');
-  }
+  const patches = Object.hasOwn(partial, 'agents') ? parseAgentConfigPatches(partial.agents) : [];
+  delete partial.agents;
   next = mergePatch(next, partial);
+  for (const { id, patch } of patches) {
+    const slot = findAgentSlot(next, id);
+    for (const field of ['workspace', 'agentDir']) {
+      if (Object.hasOwn(patch, field) && patch[field] !== slot.value[field]) {
+        throw new Error('agent ' + id + ' partial cannot change ' + field + '; use OpenClaw agent management to change directories');
+      }
+    }
+    slot.write(mergePatch(slot.value, patch));
+  }
 }
 
 const pluginPlan = managed.plugins || { ids: [], aliases: {}, channels: {} };
@@ -363,21 +396,8 @@ if (managed.advbot) {
 }
 
 const modelEntries = Object.entries(agentModels);
-if (modelEntries.length > 0) {
-  const list = Array.isArray(next.agents)
-    ? next.agents
-    : isPlainObject(next.agents) && Array.isArray(next.agents.list)
-      ? next.agents.list
-      : null;
-  if (!list) throw new Error('OpenClaw config does not contain agents.list');
-
-  for (const [agentId, model] of modelEntries) {
-    const agent = list.find((item) =>
-      isPlainObject(item) && (item.id === agentId || item.name === agentId || item.agentName === agentId)
-    );
-    if (!agent) throw new Error('OpenClaw config does not contain agent: ' + agentId);
-    agent.model = model;
-  }
+for (const [agentId, model] of modelEntries) {
+  findAgentSlot(next, agentId).value.model = model;
 }
 
 const nextText = JSON.stringify(next, null, 2) + '\\n';

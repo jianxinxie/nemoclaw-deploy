@@ -5,6 +5,7 @@ import { remoteTempBase } from './upload-agent-content.js';
 import { withTrailingSlash } from '../utils/fs.js';
 import { runCommand } from '../utils/run.js';
 import { nodeEvalScript } from '../utils/script.js';
+import { commandValue } from '../utils/output.js';
 import { validateHostFileOrDirectory } from '../utils/validators.js';
 
 export interface CopyFilesResult {
@@ -144,7 +145,7 @@ async function remotePathKind(
       displayCommand: `nemoclaw ${ctx.sandboxName} exec -- env DESTINATION=${destination} node -e <check-path-kind>`
     }
   );
-  const kind = result.stdout.trim();
+  const kind = commandValue(result.stdout);
   if (kind === 'file' || kind === 'directory' || kind === 'other') return kind;
   return 'missing';
 }

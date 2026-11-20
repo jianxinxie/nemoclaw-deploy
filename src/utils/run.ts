@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { execa } from 'execa';
 import { logger } from './logger.js';
 import { maskSensitiveText } from './mask.js';
+import { isWarningLine } from './output.js';
 
 export interface RunCommandOptions {
   dryRun?: boolean;
@@ -119,6 +120,9 @@ export async function runCommand(
       );
     }
 
+    for (const line of new Set(`${stdout}\n${stderr}`.split(/\r?\n/).filter(isWarningLine))) {
+      logger.warn(line);
+    }
     return {
       stdout: options.rawOutput && typeof result.stdout === 'string' ? result.stdout : stdout,
       stderr: options.rawOutput && typeof result.stderr === 'string' ? result.stderr : stderr,
